@@ -1,0 +1,225 @@
+import abc
+import json
+import pathlib
+import random
+from dataclasses import dataclass
+
+import dask
+import librosa
+import numpy
+import torch
+import tqdm
+
+from lib import logging
+from lib.config.schema import BinarizerConfig
+from lib.feature.mel import StretchableMelSpectrogram
+from lib.indexed_dataset import IndexedDatasetBuilder
+from lib.multiprocess import chunked_multiprocess_run
+from modules.commons.tts_modules import LengthRegulator
+
+
+ACCEPTED_AUDIO_FORMATS = {".wav", ".flac"}
+
+
+@dataclass
+class MetadataItem(abc.ABC):
+    item_name: str
+    language: str
+    waveform_fn: pathlib.Path
+    estimated_duration: float
+
+
+@dataclass
+class DataSample:
+    path: str
+    name: str
+    length: int
+    data: dict[str, int | float | numpy.ndarray]
+    error: str = None
+
+
+class BaseBinarizer(abc.ABC):
+    __data_attrs__: list[str] = None
+
+    def __init__(self, config: BinarizerConfig):
+        self.config = config
+        self.data_dir: pathlib.Path = config.data_dir_resolved
+        self.lang_map: dict[str, int] = {}
+        self.timestep = config.features.hop_size / config.features.audio_sample_rate
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.lr = LengthRegulator()
+        # Lazy-initialized modules
+        self.mel_spec = None
+
+        self.valid_items: list[MetadataItem] = []
+        self.train_items: list[MetadataItem] = []
+
+    @abc.abstractmethod
+    def load_metadata(self, subset_dir: pathlib.Path) -> list[MetadataItem]:
+        pass
+
+    @abc.abstractmethod
+    def process_item(self, item: MetadataItem) -> DataSample:
+        pass
+
+    def free_lazy_modules(self):
+        """
+        The lazy-initialized PyTorch modules should be freed before multiprocessing,
+        because of CUDA IPC (shared memory) issues on Windows platforms.
+        Reference:
+          - https://github.com/pytorch/pytorch/issues/100358
+          - https://github.com/Xiao-Chenguang/FedMind/issues/61
+        """
+        self.mel_spec = None
+
+    def process_items(self, items: list[MetadataItem], prefix: str, multiprocessing=True):
+        builder = IndexedDatasetBuilder(
+            path=self.data_dir, prefix=prefix, allowed_attr=self.__data_attrs__
+        )
+        if multiprocessing and self.config.num_workers > 0:
+            logging.debug(f"Processing {prefix} items with {self.config.num_workers} worker(s).")
+            iterable = chunked_multiprocess_run(
+                self.process_item, [(item,) for item in items], num_workers=self.config.num_workers
+            )
+        else:
+            logging.debug(f"Processing {prefix} items in main process.")
+            iterable = (self.process_item(item) for item in items)
+        item_paths = []
+        lengths = []
+        attr_lengths = {}
+        total_duration = 0
+        with tqdm.tqdm(iterable, total=len(items), desc=f"Processing {prefix} items") as progress:
+            for sample in progress:
+                sample: DataSample
+                if sample.error:
+                    logging.error(
+                        f"Error encountered in sample '{sample.name}': {sample.error}",
+                        callback=progress.write
+                    )
+                    continue
+                builder.add_item(sample.data)
+                item_paths.append(sample.path)
+                lengths.append(sample.length)
+                for k, v in sample.data.items():
+                    if isinstance(v, numpy.ndarray) and v.ndim > 0:
+                        if k not in attr_lengths:
+                            attr_lengths[k] = []
+                        attr_lengths[k].append(v.shape[0])
+                duration = sample.length * self.timestep
+                total_duration += duration
+        builder.finalize()
+        metadata = {
+            "item_paths": item_paths,
+            "lengths": lengths,
+            **attr_lengths
+        }
+        metadata = {
+            k: numpy.array(v)
+            for k, v in metadata.items()
+        }
+        with open(self.data_dir / f"{prefix}.info.npz", "wb") as f:
+            numpy.savez(f, **metadata)
+
+        logging.info(f"Total duration of {prefix}: {format_duration(total_duration)}.")
+        logging.debug(f"Processing {prefix} items done.")
+
+    def process(self):
+        index_file_paths = list(self.data_dir.rglob("index.csv"))
+        metadata_list = []
+        for index_file_path in index_file_paths:
+            subset_dir = index_file_path.parent
+            subset_metadata_list = self.load_metadata(subset_dir)
+            metadata_list.extend(subset_metadata_list)
+            logging.debug(f"Loaded {len(subset_metadata_list)} metadata items from '{subset_dir.as_posix()}'.")
+        validation_indices = sorted(random.sample(
+            range(len(metadata_list)),
+            k=min(self.config.validation_count, len(metadata_list))
+        ))
+        validation_indices_set = set(validation_indices)
+        lang_set = set()
+        for i, item in enumerate(metadata_list):
+            if item.language is not None:
+                lang_set.add(item.language)
+            if i in validation_indices_set:
+                self.valid_items.append(item)
+            else:
+                self.train_items.append(item)
+        self.lang_map = {lang: i for i, lang in enumerate(sorted(lang_set), start=1)}
+        logging.info(f"Training set total size: {len(self.train_items)}.")
+        logging.info(f"Validation set total size: {len(self.valid_items)}.")
+        if lang_set:
+            logging.info(f"Languages found: {', '.join(sorted(lang_set))}.")
+        else:
+            logging.warning("No language information found.")
+        if not self.train_items:
+            raise RuntimeError("Training set is empty.")
+        if not self.valid_items:
+            raise RuntimeError("Validation set is empty.")
+        with open(self.data_dir / "lang_map.json", "w", encoding="utf8") as f:
+            json.dump(self.lang_map, f, ensure_ascii=False)
+        self.train_items.sort(key=lambda itm: itm.estimated_duration, reverse=True)
+        self.process_items(self.valid_items, prefix="valid", multiprocessing=False)
+        self.process_items(self.train_items, prefix="train", multiprocessing=True)
+
+    @dask.delayed
+    def load_waveform(self, wav_fn: pathlib.Path):
+        waveform, _ = librosa.load(wav_fn, sr=self.config.features.audio_sample_rate, mono=True)
+        return waveform
+
+    @dask.delayed(nout=2)
+    @torch.no_grad()
+    def get_mel(self, waveform: numpy.ndarray):
+        if self.mel_spec is None:
+            self.mel_spec = StretchableMelSpectrogram(
+                sample_rate=self.config.features.audio_sample_rate,
+                n_mels=self.config.features.spectrogram.num_bins,
+                n_fft=self.config.features.fft_size,
+                win_length=self.config.features.win_size,
+                hop_length=self.config.features.hop_size,
+                fmin=self.config.features.spectrogram.fmin,
+                fmax=self.config.features.spectrogram.fmax,
+                clip_val=1e-9,
+            ).eval().to(self.device)
+        mel = self.mel_spec(
+            torch.from_numpy(waveform).to(self.device).unsqueeze(0),
+        ).squeeze(0).T.cpu().numpy()
+        return mel, mel.shape[0]
+
+    @dask.delayed
+    def sec_dur_to_frame_dur(self, dur_sec: numpy.ndarray, length: int):
+        dur_cumsum = numpy.round(numpy.cumsum(dur_sec, axis=0) / self.timestep + 0.5).astype(numpy.int64)
+        dur_cumsum = numpy.clip(dur_cumsum, a_min=0, a_max=length)
+        dur_cumsum[-1] = length
+        dur_frame = numpy.diff(dur_cumsum, axis=0, prepend=numpy.array([0]))
+        return dur_frame
+
+    @dask.delayed
+    def length_regulator(self, dur_frames: numpy.ndarray):
+        return self.lr(torch.from_numpy(dur_frames).long().unsqueeze(0)).squeeze(0).numpy()
+
+
+def format_duration(seconds: float) -> str:
+    """Formats a duration in seconds to a 'XhYmZs' string."""
+    if seconds < 0:
+        raise ValueError("Duration cannot be negative.")
+
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+
+    parts = []
+    if hours > 0:
+        parts.append(f"{int(hours)}h")
+    if minutes > 0:
+        parts.append(f"{int(minutes)}m")
+
+    # Always include seconds, formatted to two decimal places if it is less than 1 minute
+    if sec > 0:
+        if parts:
+            parts.append(f"{int(sec)}s")
+        else:
+            parts.append(f"{sec:.2f}s")
+    elif not parts:  # If total duration is 0
+        return "0s"
+
+    return "".join(parts)

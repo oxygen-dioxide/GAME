@@ -1,0 +1,2 @@
+from .boundary_emd_loss import BoundaryEarthMoversDistanceLoss
+from .regional_sim_loss import RegionalCosineSimilarityLoss
