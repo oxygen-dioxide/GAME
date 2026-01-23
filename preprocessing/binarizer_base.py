@@ -198,6 +198,11 @@ class BaseBinarizer(abc.ABC):
     def length_regulator(self, dur_frames: numpy.ndarray):
         return self.lr(torch.from_numpy(dur_frames).long().unsqueeze(0)).squeeze(0).numpy()
 
+    @dask.delayed
+    def regions_to_boundaries(self, regions: numpy.ndarray):
+        boundaries = numpy.diff(regions, axis=0, prepend=numpy.array([1])) > 0
+        return boundaries
+
 
 def format_duration(seconds: float) -> str:
     """Formats a duration in seconds to a 'XhYmZs' string."""

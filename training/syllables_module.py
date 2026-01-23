@@ -2,7 +2,6 @@ import torch
 from lightning.pytorch.loggers import TensorBoardLogger
 from torch import nn
 
-from lib.functional import mel2ph_to_dur
 from lib.plot import similarity_to_figure, boundary_to_figure
 from modules.losses import (
     BoundaryEarthMoversDistanceLoss,
@@ -44,10 +43,8 @@ class SyllablesLightningModule(BaseLightningModule):
                 language_ids,
                 torch.zeros_like(language_ids)
             )
-        frame2syllable = sample["frame2syllable"]
-        boundaries_gt = torch.diff(
-            frame2syllable, dim=1, prepend=frame2syllable.new_ones((frame2syllable.shape[0], 1))
-        ) > 0
+        regions = sample["regions"]
+        boundaries_gt = sample["boundaries"]
 
         features, boundaries = self.model(spectrogram, language_ids)  # [B, T, T]
         if infer:
@@ -59,7 +56,7 @@ class SyllablesLightningModule(BaseLightningModule):
                 "boundaries": boundaries,
             }
         else:
-            region_loss = self.losses["region_loss"](features, frame2syllable)
+            region_loss = self.losses["region_loss"](features, regions)
             boundary_loss = self.losses["boundary_loss"](boundaries, boundaries_gt.float())
             return {
                 "region_loss": region_loss,
@@ -70,15 +67,13 @@ class SyllablesLightningModule(BaseLightningModule):
         for i in range(len(sample["indices"])):
             data_idx = sample['indices'][i].item()
             T = self.valid_dataset.info["lengths"][data_idx]
+            N = self.valid_dataset.info["durations"][data_idx]
             if data_idx >= self.training_config.validation.max_plots:
                 continue
             similarities = outputs["similarities"][i, :T, :T]  # [T, T]
             boundaries = outputs["boundaries"][i, :T]  # [T]
-            frame2syllable = sample["frame2syllable"][i, :T]  # [T]
-            durations = mel2ph_to_dur(frame2syllable.unsqueeze(0), frame2syllable.max()).squeeze(0)  # [N]
-            boundaries_gt = torch.diff(
-                frame2syllable, dim=0, prepend=frame2syllable.new_ones((1,))
-            ) > 0
+            durations = sample["durations"][i, :N]  # [N]
+            boundaries_gt = sample["boundaries"][i, :T]  # [T]
             self.plot_regions(
                 data_idx, similarities, durations,
                 title=self.valid_dataset.info["item_paths"][data_idx]

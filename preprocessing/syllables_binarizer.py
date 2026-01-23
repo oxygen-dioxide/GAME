@@ -11,7 +11,9 @@ from .binarizer_base import BaseBinarizer, MetadataItem, DataSample, ACCEPTED_AU
 
 SYLLABLES_ITEM_ATTRIBUTES = [
     "language_id",  # int64
-    "frame2syllable",  # int64 [T,]
+    "durations",  # int64 [N,]
+    "regions",  # int64 [T,]
+    "boundaries",  # bool [T,]
     "spectrogram",  # float32 [T, C]
 ]
 
@@ -61,10 +63,13 @@ class SyllablesBinarizer(BaseBinarizer):
         spectrogram, length = self.get_mel(waveform)
         syllable_dur_sec = numpy.array(item.syllable_durations, dtype=numpy.float32)
         syllable_dur_frames = self.sec_dur_to_frame_dur(syllable_dur_sec, length)
-        frame2syllable = self.length_regulator(syllable_dur_frames)
+        regions = self.length_regulator(syllable_dur_frames)
+        boundaries = self.regions_to_boundaries(regions)
         data = {
             "language_id": language_id,
-            "frame2syllable": frame2syllable,
+            "durations": syllable_dur_frames,
+            "regions": regions,
+            "boundaries": boundaries,
             "spectrogram": spectrogram,
         }
         data, length = dask.compute(data, length)
