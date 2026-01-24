@@ -188,7 +188,7 @@ class BaseBinarizer(abc.ABC):
 
     @dask.delayed
     def sec_dur_to_frame_dur(self, dur_sec: numpy.ndarray, length: int):
-        dur_cumsum = numpy.round(numpy.cumsum(dur_sec, axis=0) / self.timestep + 0.5).astype(numpy.int64)
+        dur_cumsum = numpy.round(numpy.cumsum(dur_sec, axis=0) / self.timestep).astype(numpy.int64)
         dur_cumsum = numpy.clip(dur_cumsum, a_min=0, a_max=length)
         dur_cumsum[-1] = length
         dur_frame = numpy.diff(dur_cumsum, axis=0, prepend=numpy.array([0]))
