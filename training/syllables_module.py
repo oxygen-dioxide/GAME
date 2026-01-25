@@ -26,6 +26,7 @@ class SyllablesLightningModule(BaseLightningModule):
     def register_losses_and_metrics(self) -> None:
         self.register_loss("region_loss", RegionalCosineSimilarityLoss(
             neighborhood_size=self.training_config.loss.region_loss.neighborhood_size,
+            exponential_decay=self.training_config.loss.region_loss.exponential_decay,
         ))
         self.register_loss("boundary_loss", BoundaryEarthMoversDistanceLoss(
             bidirectional=self.training_config.loss.boundary_loss.bidirectional,
@@ -43,7 +44,7 @@ class SyllablesLightningModule(BaseLightningModule):
         regions = sample["regions"]
         boundaries_gt = sample["boundaries"]
 
-        features, boundaries = self.model(spectrogram, language_ids)  # [B, T, T]
+        features, boundaries = self.model(spectrogram, language_ids, mask=regions != 0)  # [B, T, T]
         if infer:
             similarities = self_cosine_similarity(features)  # [B, T, T]
             return {
