@@ -24,6 +24,22 @@ def similarity_to_figure(similarities, durations, title=None):
     return fig
 
 
+def distance_to_figure(
+        distance_gt: np.ndarray, distance_pred: np.ndarray,
+        title=None
+):
+    fig = plt.figure(figsize=(12, 6))
+    plt.plot(distance_gt, color='b', label='gt')
+    plt.plot(distance_pred, color='r', label='pred')
+    plt.ylim(min(0, distance_gt.min(), distance_pred.min()) - 1, min(distance_gt.max(), distance_pred.max()) + 1)
+    plt.grid(axis='y')
+    plt.legend()
+    if title is not None:
+        plt.title(title, fontsize=15)
+    plt.tight_layout()
+    return fig
+
+
 def boundary_to_figure(
         bounds_gt: np.ndarray, bounds_pred: np.ndarray,
         dur_gt: np.ndarray = None, dur_pred: np.ndarray = None,

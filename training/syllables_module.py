@@ -2,11 +2,11 @@ import torch
 from lightning.pytorch.loggers import TensorBoardLogger
 from torch import nn
 
-from lib.functional import self_cosine_similarity
-from lib.plot import similarity_to_figure, boundary_to_figure
+from lib.functional import self_cosine_similarity, distance_transform
+from lib.plot import similarity_to_figure, boundary_to_figure, distance_to_figure
 from modules.losses import (
-    BoundaryEarthMoversDistanceLoss,
-    RegionalCosineSimilarityLoss
+    ApproachingMomentumLoss,
+    RegionalCosineSimilarityLoss,
 )
 from modules.syllable_splitter import SyllableSplitter
 from .data import BaseDataset
@@ -28,8 +28,11 @@ class SyllablesLightningModule(BaseLightningModule):
             neighborhood_size=self.training_config.loss.region_loss.neighborhood_size,
             exponential_decay=self.training_config.loss.region_loss.exponential_decay,
         ))
-        self.register_loss("boundary_loss", BoundaryEarthMoversDistanceLoss(
-            bidirectional=self.training_config.loss.boundary_loss.bidirectional,
+        self.register_loss("boundary_loss", ApproachingMomentumLoss(
+            constant_radius=self.training_config.loss.boundary_loss.constant_radius,
+            cutoff_radius=self.training_config.loss.boundary_loss.cutoff_radius,
+            decay_power=self.training_config.loss.boundary_loss.decay_power,
+            decay_alpha=self.training_config.loss.boundary_loss.decay_alpha,
         ))
 
     def forward_model(self, sample: dict[str, torch.Tensor], infer: bool) -> dict[str, torch.Tensor]:
@@ -42,18 +45,19 @@ class SyllablesLightningModule(BaseLightningModule):
                 torch.zeros_like(language_ids)
             )
         regions = sample["regions"]
-        boundaries_gt = sample["boundaries"]
+        boundaries = sample["boundaries"]
+        mask = regions != 0
 
-        features, boundaries = self.model(spectrogram, language_ids, mask=regions != 0)  # [B, T, T]
+        features, velocities = self.model(spectrogram, language_ids, mask=mask)  # [B, T, T]
         if infer:
             similarities = self_cosine_similarity(features)  # [B, T, T]
             return {
                 "similarities": similarities,
-                "boundaries": boundaries,
+                "velocities": velocities,
             }
         else:
             region_loss = self.losses["region_loss"](features, regions)
-            boundary_loss = self.losses["boundary_loss"](boundaries, boundaries_gt.float())
+            boundary_loss = self.losses["boundary_loss"](velocities, boundaries, mask=mask)
             return {
                 "region_loss": region_loss,
                 "boundary_loss": boundary_loss,
@@ -67,15 +71,17 @@ class SyllablesLightningModule(BaseLightningModule):
             if data_idx >= self.training_config.validation.max_plots:
                 continue
             similarities = outputs["similarities"][i, :T, :T]  # [T, T]
-            boundaries = outputs["boundaries"][i, :T]  # [T]
+            velocities = outputs["velocities"][i, :T]  # [T]
             durations = sample["durations"][i, :N]  # [N]
-            boundaries_gt = sample["boundaries"][i, :T]  # [T]
+            boundaries = sample["boundaries"][i, :T]  # [T]
+            distance_gt = distance_transform(boundaries)
+            distance_pred = velocities.cumsum(dim=0)
             self.plot_regions(
                 data_idx, similarities, durations,
                 title=self.valid_dataset.info["item_paths"][data_idx]
             )
-            self.plot_boundaries(
-                data_idx, boundaries_gt, boundaries, durations_gt=durations,
+            self.plot_distance(
+                data_idx, distance_gt, distance_pred,
                 title=self.valid_dataset.info["item_paths"][data_idx]
             )
 
@@ -106,4 +112,16 @@ class SyllablesLightningModule(BaseLightningModule):
         logger: TensorBoardLogger = self.logger
         logger.experiment.add_figure(f"boundaries/boundaries_{idx}", boundary_to_figure(
             boundaries_gt, boundaries_pred, dur_gt=durations_gt, dur_pred=durations_pred, title=title
+        ), global_step=self.global_step)
+
+    def plot_distance(
+            self, idx: int,
+            distance_gt: torch.Tensor, distance_pred: torch.Tensor,
+            title=None
+    ):
+        distance_gt = distance_gt.cpu().numpy()
+        distance_pred = distance_pred.cpu().numpy()
+        logger: TensorBoardLogger = self.logger
+        logger.experiment.add_figure(f"boundaries/boundaries_{idx}", distance_to_figure(
+            distance_gt, distance_pred, title=title
         ), global_step=self.global_step)

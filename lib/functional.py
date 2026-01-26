@@ -1,4 +1,3 @@
-import numpy
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -72,27 +71,22 @@ def random_continuous_masks(*shape: int, dim: int, device: str | torch.device = 
     return masks
 
 
-def resample_align_curve(points: numpy.ndarray, original_timestep: float, target_timestep: float, align_length: int):
-    t_max = (len(points) - 1) * original_timestep
-    curve_interp = numpy.interp(
-        numpy.arange(0, t_max, target_timestep),
-        original_timestep * numpy.arange(len(points)),
-        points
-    ).astype(points.dtype)
-    delta_l = align_length - len(curve_interp)
-    if delta_l < 0:
-        curve_interp = curve_interp[:align_length]
-    elif delta_l > 0:
-        curve_interp = numpy.concatenate((curve_interp, numpy.full(delta_l, fill_value=curve_interp[-1])), axis=0)
-    return curve_interp
-
-
-def resize_curve(curve: numpy.ndarray, target_length: int):
-    original_length = len(curve)
-    original_indices = numpy.linspace(0, original_length - 1, num=original_length)
-    target_indices = numpy.linspace(0, original_length - 1, num=target_length)
-    interpolated_curve = numpy.interp(target_indices, original_indices, curve).astype(curve.dtype)
-    return interpolated_curve
+def distance_transform(boundaries: Tensor) -> Tensor:
+    """
+    Compute the distance transform for binary boundary indicators.
+    For consistency with cases where there are no boundaries, we pad boundaries with 1s at both ends.
+    For each position, compute the distance to the nearest boundary (where boundary == 1).
+    :param boundaries: [..., T], 1 = boundary, 0 = non-boundary
+    :return: [..., T]
+    """
+    boundaries = F.pad(boundaries, (1, 1), mode="constant", value=1)
+    indices = torch.arange(
+        boundaries.shape[-1], dtype=torch.float32, device=boundaries.device,
+    ).view([1] * (boundaries.ndim - 1) + [-1])  # [..., T]
+    masked_indices = torch.where(boundaries, indices, torch.full_like(indices, fill_value=float("inf")))
+    distance = torch.abs(indices.unsqueeze(-1) - masked_indices.unsqueeze(-2)).min(dim=-1).values
+    distance = distance[..., 1:-1]
+    return distance
 
 
 def self_cosine_similarity(x: Tensor) -> Tensor:

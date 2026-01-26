@@ -17,5 +17,5 @@ class SyllableSplitter(nn.Module):
 
     def forward(self, spectrogram, language, mask=None):
         x = self.language_embedding(language.unsqueeze(-1)) + self.spectrogram_projection(spectrogram)
-        features, boundaries = self.backbone(x, mask=mask)
-        return features, boundaries
+        features, velocities = self.backbone(x, mask=mask)
+        return features, velocities

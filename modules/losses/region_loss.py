@@ -24,7 +24,7 @@ class RegionalCosineSimilarityLoss(nn.Module):
         self.neighborhood_size = neighborhood_size
         self.exponential_decay = exponential_decay
 
-    def get_sign_and_mask(self, regions: Tensor) -> Tensor:
+    def get_sign_and_mask(self, regions: Tensor):
         regions1 = regions.unsqueeze(2)  # [B, T, 1]
         regions2 = regions.unsqueeze(1)  # [B, 1, T]
         distance = torch.abs(regions1 - regions2)  # [B, T, T]

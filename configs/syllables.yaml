@@ -47,7 +47,10 @@ training:
       neighborhood_size: 5
       exponential_decay: true
     boundary_loss:
-      bidirectional: false
+      constant_radius: 20
+      cutoff_radius: 40
+      decay_power: 2.0
+      decay_alpha: 0.5
   dataloader:
     max_batch_frames: 30000
     max_batch_size: 32

@@ -119,7 +119,10 @@ class RegionLossConfig(ConfigBaseModel):
 
 
 class BoundaryLossConfig(ConfigBaseModel):
-    bidirectional: bool = Field(False)
+    constant_radius: int = Field(20)
+    cutoff_radius: int = Field(40)
+    decay_power: float = Field(2.0)
+    decay_alpha: float = Field(0.5)
 
 
 class LossConfig(ConfigBaseModel):

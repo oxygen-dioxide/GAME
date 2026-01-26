@@ -291,7 +291,7 @@ class EBFBackbone(nn.Module):
     完整的EBF Backbone，符合SyllableSplitter接口规范
     
     输入: x [B, T, in_dim]
-    输出: features [B, T, sim_dim], boundaries [B, T]
+    输出: features [B, T, sim_dim], velocities [B, T]
     """
 
     def __init__(
@@ -343,11 +343,11 @@ class EBFBackbone(nn.Module):
     def forward(self, x, mask=None):
         """
         Args:
-            x: [B, T, in_dim] 输入特征 (Mel频谱)
-            mask: [B, T] 可选的mask
+            x: [B, T, in_dim] input spectrogram
+            mask: [B, T] valid mask
         Returns:
-            features: [B, T, sim_dim] 用于余弦相似度计算
-            boundaries: [B, T] 边界概率 (0~1)
+            features: [B, T, sim_dim] for self cosine similarity
+            velocities: [B, T] velocity towards boundaries
         """
         x = self.input_proj(x)
 
@@ -361,6 +361,6 @@ class EBFBackbone(nn.Module):
             x = layer(x, mask=mask)
         x = self.output_norm2(x)
 
-        boundaries = self.boundary_head(x).squeeze(-1).sigmoid()  # [B, T]
+        velocities = self.boundary_head(x).squeeze(-1).tanh()  # [B, T]
 
-        return features, boundaries
+        return features, velocities
