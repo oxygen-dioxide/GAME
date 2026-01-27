@@ -230,30 +230,41 @@ class EBF(nn.Module):
             c_latent_drop=0.0, use_ls=True, ffn_type='glu', ffn_latent_drop=0.1, ffn_out_drop=0.1
     ):
         super().__init__()
-        self.ffn1 = (
-            GLUFFN(
+
+
+
+        if ffn_type == 'glu':
+            self.ffn1 =GLUFFN(
                 dim, latent_dim=dim * 4, dropout_latent=ffn_latent_drop,
                 dropout_output=ffn_out_drop
             )
-            if ffn_type == 'glu' else
-            FFN(
+            self.ffn2 =GLUFFN(
+                dim, latent_dim=dim * 4, dropout_latent=ffn_latent_drop,
+                dropout_output=ffn_out_drop
+            )
+        elif ffn_type=='ffn':
+            self.ffn1 =FFN(
                 dim, latent_dim=dim * 4,
                 dropout_latent=ffn_latent_drop,
                 dropout_output=ffn_out_drop
             )
-        )
-        self.ffn2 = (
-            GLUFFN(
-                dim, latent_dim=dim * 4, dropout_latent=ffn_latent_drop,
-                dropout_output=ffn_out_drop
-            )
-            if ffn_type == 'glu'
-            else FFN(
+            self.ffn2 =FFN(
                 dim, latent_dim=dim * 4,
                 dropout_latent=ffn_latent_drop,
                 dropout_output=ffn_out_drop
             )
-        )
+        elif ffn_type=='cgmlp':
+            self.ffn1 =CgMLP(
+                dim, latent_dim=int(dim * 2.5), latent_drop=ffn_latent_drop,
+                out_drop=ffn_out_drop,kernel_size=21
+            )
+            self.ffn2 =CgMLP(
+                dim, latent_dim=int(dim * 2.5), latent_drop=ffn_latent_drop,
+                out_drop=ffn_out_drop,kernel_size=7
+            )
+        else:
+            raise ValueError(f"Unknown ffn_type: {ffn_type}")
+
         self.attn = PAC(
             dim, num_heads, head_dim, c_kernel_size, m_kernel_size, use_rope, rope_cache, dropout_attn,
             out_drop, c_out_drop, c_latent_drop
