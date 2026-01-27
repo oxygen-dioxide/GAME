@@ -77,6 +77,7 @@ class ModelConfig(ConfigBaseModel):
     in_channels: int = Field(None, json_schema_extra={
         "dynamic_expr": ref("binarizer.features.spectrogram.num_bins")
     })
+    embedding_dim: int = Field(128, gt=0)
     backbone_class: str = Field(...)
     backbone_kwargs: dict[str, Any] = Field(...)
 

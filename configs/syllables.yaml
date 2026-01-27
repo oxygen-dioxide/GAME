@@ -19,6 +19,7 @@ binarizer:
 
 model:
   num_languages: 127
+  embedding_dim: 80
   backbone_class: "modules.backbones.EBF.EBFBackbone"
   backbone_kwargs:
     dim: 256
