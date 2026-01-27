@@ -65,7 +65,7 @@ def distance_boundary_to_figure(
     if boundaries_fp is not None:
         _draw_circles(positions[boundaries_fp], distance_pred, 'orange', 'exceed')
     if boundaries_fn is not None:
-        _draw_circles(positions[boundaries_fn], distance_pred, 'grey', 'miss')
+        _draw_circles(positions[boundaries_fn], distance_gt, 'grey', 'miss')
     plt.xlim(-1, distance_gt.shape[0])
     plt.ylim(y_min, y_max)
     plt.grid(axis='y')
