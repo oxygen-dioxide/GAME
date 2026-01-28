@@ -91,10 +91,10 @@ class SyllablesLightningModule(BaseLightningModule):
     def plot_validation_results(self, sample: dict[str, torch.Tensor], outputs: dict[str, torch.Tensor]) -> None:
         for i in range(len(sample["indices"])):
             data_idx = sample['indices'][i].item()
-            T = self.valid_dataset.info["lengths"][data_idx]
-            N = self.valid_dataset.info["durations"][data_idx]
             if data_idx >= self.training_config.validation.max_plots:
                 continue
+            T = self.valid_dataset.info["lengths"][data_idx]
+            N = self.valid_dataset.info["durations"][data_idx]
             durations = sample["durations"][i, :N]  # [N]
             boundaries = sample["boundaries"][i, :T]  # [T]
             similarities = outputs["similarities"][i, :T, :T]  # [T, T]
