@@ -12,7 +12,7 @@ from modules.losses import (
     RegionalCosineSimilarityLoss,
     GaussianBlurredBinsLoss,
 )
-from modules.metrics.score import (
+from modules.metrics.pitch import (
     RawPitchAccuracy,
     OverallAccuracy,
     NotePresenceMetricCollection,

@@ -9,10 +9,10 @@ class QuantityMetricCollection(torchmetrics.Metric):
     """
     This metric collection computes a set of quantity-based metrics for boundary matching tasks.
     Arguments:
-        - tolerance: int, maximum distance to consider a match between predicted and ground truth boundaries.
+        tolerance: int, maximum distance to consider a match between predicted and ground truth boundaries.
     Inputs:
-        - pred_boundaries: Tensor of shape [B, T], predicted boundary indicators, 0 = no boundary, 1 = boundary.
-        - target_boundaries: Tensor of shape [B, T], ground truth boundary indicators, 0 = no boundary, 1 = boundary.
+        - pred_boundaries: Tensor of shape [..., T], predicted boundary indicators, 0 = no boundary, 1 = boundary.
+        - target_boundaries: Tensor of shape [..., T], ground truth boundary indicators, 0 = no boundary, 1 = boundary.
     Outputs:
         - quantity_error_rate: Scalar tensor representing the Quantity Error Rate (QER).
         - quantity_precision: Scalar tensor representing the precision, i.e. TP / (TP + FP).
