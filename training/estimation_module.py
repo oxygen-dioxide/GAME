@@ -13,6 +13,7 @@ from modules.losses import (
     GaussianBlurredBinsLoss,
 )
 from modules.metrics.pitch import (
+    RawPitchRMSE,
     RawPitchAccuracy,
     OverallAccuracy,
     NotePresenceMetricCollection,
@@ -55,6 +56,7 @@ class EstimationLightningModule(BaseLightningModule):
             num_bins=self.model_config.midi_num_bins,
             deviation=self.training_config.loss.note_loss.deviation,
         ))
+        self.register_metric("raw_pitch_rmse", RawPitchRMSE())
         self.register_metric("raw_pitch_accuracy", RawPitchAccuracy(
             tolerance=NOTE_ACCURACY_TOLERANCE,
         ))
@@ -86,12 +88,19 @@ class EstimationLightningModule(BaseLightningModule):
                 threshold=NOTE_DECODING_THRESHOLD,
             )
             weights = durations.clamp(min=0).float()
+            self.metrics["raw_pitch_rmse"].update(
+                pred_scores=scores_pred,
+                target_scores=scores, target_presence=presence,
+                weights=weights, mask=n_mask,
+            )
             self.metrics["raw_pitch_accuracy"].update(
-                scores_pred, presence_pred, scores, presence,
+                pred_scores=scores_pred,
+                target_scores=scores, target_presence=presence,
                 weights=weights, mask=n_mask,
             )
             self.metrics["overall_accuracy"].update(
-                scores_pred, presence_pred, scores, presence,
+                pred_scores=scores_pred, pred_presence=presence_pred,
+                target_scores=scores, target_presence=presence,
                 weights=weights, mask=n_mask,
             )
             self.metrics["presence_metric_collection"].update(

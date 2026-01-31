@@ -5,6 +5,43 @@ import torchmetrics
 from torch import Tensor
 
 
+class RawPitchRMSE(torchmetrics.Metric):
+    """
+    This metric computes Root Mean Squared Error (RMSE) for pitch scores, considering only the voiced frames
+    in the ground truth.
+    Inputs:
+        - pred_scores: Tensor of shape [..., T], predicted pitch scores.
+        - target_scores: Tensor of shape [..., T], target pitch scores.
+        - target_presence: Boolean tensor of shape [..., T], target presence indicators, 0 means no score or unvoiced.
+        - weights: Optional Tensor of shape [..., T], weights to apply on each frame.
+        - mask: Optional Tensor of shape [..., T], mask to apply on the frames.
+    Outputs:
+        Scalar tensor representing the Root Mean Squared Error.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.add_state("squared_error", default=torch.tensor(0.0, dtype=torch.float32), dist_reduce_fx="sum")
+        self.add_state("total", default=torch.tensor(0.0, dtype=torch.float32), dist_reduce_fx="sum")
+
+    def update(
+            self, pred_scores: Tensor,
+            target_scores: Tensor, target_presence: Tensor,
+            weights: Tensor = None, mask: Tensor = None
+    ) -> None:
+        if weights is None:
+            weights = torch.ones_like(target_scores).float()
+        if mask is not None:
+            weights = weights * mask.float()
+        squared_errors = (pred_scores - target_scores) ** 2
+        squared_errors = squared_errors * target_presence.float()
+        self.squared_error += (squared_errors * weights).sum()
+        self.total += (target_presence.float() * weights).sum()
+
+    def compute(self) -> Any:
+        return torch.sqrt(self.squared_error / (self.total + 1e-6))
+
+
 class RawPitchAccuracy(torchmetrics.Metric):
     """
     This metric computes Raw Pitch Accuracy (RPA), which is the number of correctly predicted pitch frames
@@ -13,7 +50,6 @@ class RawPitchAccuracy(torchmetrics.Metric):
         tolerance: float, maximum allowed difference between predicted and target scores to be considered correct.
     Inputs:
         - pred_scores: Tensor of shape [..., T], predicted pitch scores.
-        - pred_presence: Boolean tensor of shape [..., T], predicted presence indicators, 0 means no score or unvoiced.
         - target_scores: Tensor of shape [..., T], target pitch scores.
         - target_presence: Boolean tensor of shape [..., T], target presence indicators, 0 means no score or unvoiced.
         - weights: Optional Tensor of shape [..., T], weights to apply on each frame.
@@ -29,7 +65,7 @@ class RawPitchAccuracy(torchmetrics.Metric):
         self.add_state("total", default=torch.tensor(0.0, dtype=torch.float32), dist_reduce_fx="sum")
 
     def update(
-            self, pred_scores: Tensor, pred_presence: Tensor,
+            self, pred_scores: Tensor,
             target_scores: Tensor, target_presence: Tensor,
             weights: Tensor = None, mask: Tensor = None
     ) -> None:
