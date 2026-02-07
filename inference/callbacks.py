@@ -26,13 +26,6 @@ class _NoteInfo:
     pitch: float
 
 
-@dataclass
-class _MidiNote:
-    onset: int
-    offset: int
-    pitch: int
-
-
 class SaveFileCallback(lightning.pytorch.callbacks.Callback, abc.ABC):
     def __init__(self, output_dir: str | pathlib.Path):
         super().__init__()
