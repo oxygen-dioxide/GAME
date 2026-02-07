@@ -45,12 +45,7 @@ class SpectrogramConfig(ConfigBaseModel):
     type: Literal["mel"] = Field("mel")
     num_bins: int = Field(128, gt=0)
     fmin: float = Field(0, ge=0)
-    fmax: float = Field(8000, ge=0, json_schema_extra={
-        "dynamic_check": DynamicCheck(
-            expr=this() > ref("binarizer.features.spectrogram.fmin"),
-            message="fmax must be greater than fmin."
-        )
-    })
+    fmax: float = Field(8000, ge=0)
 
 
 class BinarizerFeaturesConfig(ConfigBaseModel):
@@ -59,6 +54,17 @@ class BinarizerFeaturesConfig(ConfigBaseModel):
     fft_size: int = Field(2048, gt=0)
     win_size: int = Field(2048, gt=0)
     spectrogram: SpectrogramConfig = Field(...)
+
+    @property
+    def timestep(self):
+        return self.hop_size / self.audio_sample_rate
+
+    # noinspection PyMethodParameters
+    @field_validator("spectrogram")
+    def check_kwargs(cls, v: SpectrogramConfig):
+        if v.fmin >= v.fmax:
+            raise ValueError("fmin must be less than fmax.")
+        return v
 
 
 class BinarizerConfig(ConfigBaseModel):
@@ -353,21 +359,17 @@ class InferenceConfig(ConfigBaseModel):
     features: BinarizerFeaturesConfig = Field(None, json_schema_extra={
         "dynamic_expr": ref("binarizer.features")
     })
-    use_language_embedding: bool = Field(None, json_schema_extra={
-        "scope": ConfigurationScope.SEGMENTATION,
-        "dynamic_expr": ref("model.use_language_embedding")
-    })
     midi_min: float = Field(None, json_schema_extra={
         "scope": ConfigurationScope.ESTIMATION,
-        "dynamic_expr": ref("loss.note_loss.midi_min")
+        "dynamic_expr": ref("training.loss.note_loss.midi_min")
     })
     midi_max: float = Field(None, json_schema_extra={
         "scope": ConfigurationScope.ESTIMATION,
-        "dynamic_expr": ref("loss.note_loss.midi_max")
+        "dynamic_expr": ref("training.loss.note_loss.midi_max")
     })
     note_dial_periods: list[float] = Field(None, json_schema_extra={
         "scope": ConfigurationScope.ESTIMATION,
-        "dynamic_expr": ref("loss.note_loss.dial_periods")
+        "dynamic_expr": ref("training.loss.note_loss.dial_periods")
     })
 
 

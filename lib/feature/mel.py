@@ -32,7 +32,7 @@ class StretchableMelSpectrogram(torch.nn.Module):
         self.clip_val = clip_val
 
         mel_basis = librosa_mel_fn(sr=sample_rate, n_fft=n_fft, n_mels=n_mels, fmin=fmin, fmax=fmax)
-        self.register_buffer("mel_basis", torch.from_numpy(mel_basis).float())
+        self.register_buffer("mel_basis", torch.from_numpy(mel_basis).float(), persistent=False)
 
     def forward(self, y, key_shift=0, speed=1, center=False):
         factor = 2 ** (key_shift / 12)

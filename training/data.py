@@ -12,6 +12,7 @@ from lib.indexed_dataset import IndexedDataset
 
 
 __all__ = [
+    "collate_nd",
     "BaseDataset",
     "DynamicBatchSampler",
 ]

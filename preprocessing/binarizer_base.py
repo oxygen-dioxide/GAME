@@ -41,7 +41,7 @@ class BaseBinarizer(abc.ABC):
         self.config = config
         self.data_dir: pathlib.Path = config.data_dir_resolved
         self.lang_map: dict[str, int] = {}
-        self.timestep = config.features.hop_size / config.features.audio_sample_rate
+        self.timestep = config.features.timestep
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.lr = LengthRegulator()
@@ -75,6 +75,7 @@ class BaseBinarizer(abc.ABC):
         )
         if multiprocessing and self.config.num_workers > 0:
             logging.debug(f"Processing {prefix} items with {self.config.num_workers} worker(s).")
+            self.free_lazy_modules()
             iterable = chunked_multiprocess_run(
                 self.process_item, [(item,) for item in items], num_workers=self.config.num_workers
             )

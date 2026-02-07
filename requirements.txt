@@ -10,6 +10,7 @@ librosa
 lightning
 loguru
 matplotlib
+mido
 numpy<2.0.0
 omegaconf
 onnx
