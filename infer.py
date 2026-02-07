@@ -31,6 +31,21 @@ def _validate_exts(ctx, param, value) -> set[str]:
         raise click.BadParameter(f"Invalid extensions: {e}")
 
 
+# noinspection PyUnusedLocal
+def _validate_output_formats(ctx, param, value) -> set[str]:
+    try:
+        formats = {fmt.strip().lower() for fmt in value.split(",")}
+        supported_formats = {"mid", "txt", "csv"}
+        if not formats.issubset(supported_formats):
+            raise ValueError(
+                f"Unsupported formats: {formats - supported_formats}. "
+                f"Supported formats: {supported_formats}"
+            )
+        return formats
+    except Exception as e:
+        raise click.BadParameter(f"Invalid output formats: {e}")
+
+
 def _t0_nstep_to_ts(t0: float, nsteps: int) -> list[float]:
     if nsteps == 1:
         return [t0]
@@ -166,8 +181,30 @@ def shared_options(func):
     )
 )
 @click.option(
+    "--output-formats", type=str, default="mid", show_default=True,
+    callback=_validate_output_formats,
+    help=(
+            "List of output formats to save the extracted results, separated by commas. "
+            "Supported formats: mid, txt, csv."
+    )
+)
+@click.option(
     "--tempo", type=click.FloatRange(min=0, min_open=True), default=120, show_default=True,
-    help="Tempo (in BPM) to save MIDI files with."
+    help="Tempo (in BPM) to save MIDI files with. Ignored for non-MIDI output formats."
+)
+@click.option(
+    "--pitch-format", type=click.Choice(["number", "name"]), default="name", show_default=True,
+    help=(
+            "Format to save pitch in text-based output formats. "
+            "Ignored for MIDI output. 'number' saves MIDI pitch numbers, while 'name' saves note names (e.g. C4+10)."
+    )
+)
+@click.option(
+    "--round-pitch", is_flag=True, default=False, show_default=True,
+    help=(
+            "Whether to round pitch values to the nearest integer in text-based output formats. "
+            "Ignored for MIDI output. If not set, pitch values will be saved with decimals or cents."
+    )
 )
 @click.option(
     "--output-dir", type=click.Path(
@@ -194,6 +231,9 @@ def extract(
         est_threshold: float,
         exts: set[str],
         glob: str,
+        output_formats: set[str],
+        pitch_format: str,
+        round_pitch: bool,
         tempo: float,
         output_dir: pathlib.Path,
 ):
@@ -211,7 +251,7 @@ def extract(
     )
     from inference.slicer2 import Slicer
     from inference.data import SlicedAudioFileIterableDataset
-    from inference.callbacks import SaveMidiCallback
+    from inference.callbacks import SaveMidiCallback, SaveTextCallback
 
     segmentation_model, lang_map = load_segmentation_inference_model(seg)
     estimation_model = load_estimation_inference_model(est)
@@ -232,12 +272,26 @@ def extract(
         ),
         language=language_id,
     )
-    callbacks = [
-        SaveMidiCallback(
+    callbacks = []
+    if "mid" in output_formats:
+        callbacks.append(SaveMidiCallback(
             output_dir=output_dir,
             tempo=tempo,
-        )
-    ]
+        ))
+    if "txt" in output_formats:
+        callbacks.append(SaveTextCallback(
+            output_dir=output_dir,
+            file_format="txt",
+            pitch_format=pitch_format,
+            round_pitch=round_pitch,
+        ))
+    if "csv" in output_formats:
+        callbacks.append(SaveTextCallback(
+            output_dir=output_dir,
+            file_format="csv",
+            pitch_format=pitch_format,
+            round_pitch=round_pitch,
+        ))
     run_inference(
         segmentation_model=segmentation_model,
         estimation_model=estimation_model,
