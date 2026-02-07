@@ -6,6 +6,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from modules.backbones.RoPosEmb_s2 import SingleRoPosEmb
+from modules.backbones.eglu import HalfCacheGLUFFN
 
 
 class LayScale(nn.Module):
@@ -260,6 +261,10 @@ class EBF(nn.Module):
                 dim, latent_dim=int(dim * 2.5), latent_drop=ffn_latent_drop,
                 out_drop=ffn_out_drop, kernel_size=7
             )
+        elif ffn_type == 'eglu':
+            self.ffn1 =HalfCacheGLUFFN(d_model=dim, d_ff=dim * 4, gate_type='silu', quant_bits=0)
+            self.ffn2 =HalfCacheGLUFFN(d_model=dim, d_ff=dim * 4, gate_type='silu', quant_bits=0)
+
         else:
             raise ValueError(f"Unknown ffn_type: {ffn_type}")
 
