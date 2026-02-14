@@ -14,6 +14,7 @@ from .ops import (
 class ConfigurationScope:
     SEGMENTATION = 0x1
     ESTIMATION = 0x2
+    GAME = SEGMENTATION | ESTIMATION
 
 
 class DynamicCheck:
@@ -117,6 +118,13 @@ class ModelConfig(ConfigBaseModel):
     estimator: BackboneConfig = Field(None, json_schema_extra={
         "scope": ConfigurationScope.ESTIMATION,
         "dynamic_check": RequiredOnGivenScope(ConfigurationScope.SEGMENTATION),
+    })
+    spectrogram_encoder: BackboneConfig = Field(None, json_schema_extra={
+        "scope": ConfigurationScope.ESTIMATION,
+        "dynamic_check": RequiredOnGivenScope(ConfigurationScope.ESTIMATION),
+    })
+    use_spectrogram_encoder_glu: bool = Field(True, json_schema_extra={
+        "scope": ConfigurationScope.ESTIMATION
     })
 
 
