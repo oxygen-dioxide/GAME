@@ -95,7 +95,6 @@ class ModelConfig(ConfigBaseModel):
     estimator_out_dim: int = Field(None, json_schema_extra={
         "dynamic_expr": ref("training.loss.note_loss.midi_num_bins")
     })
-    use_glu: bool = Field(False)
     encoder: BackboneConfig = Field(...)
     segmenter: BackboneConfig = Field(...)
     estimator: BackboneConfig = Field(...)
