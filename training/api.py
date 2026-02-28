@@ -13,6 +13,13 @@ from lib.config.io import load_raw_config
 from lib.config.schema import RootConfig, PeriodicCheckpointConfig, ExpressionCheckpointConfig
 
 
+__all__ = [
+    "load_config_for_training",
+    "find_latest_checkpoints",
+    "train_model",
+]
+
+
 @rank_zero_only
 def _log_config(cfg: RootConfig):
     formatter = ModelFormatter()

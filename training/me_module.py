@@ -75,7 +75,7 @@ class MIDIExtractionModule(BaseLightningModule):
             postfix=postfix,
         ))
         self.register_metric(f"presence_metric_collection{postfix}", NotePresenceMetricCollection(
-            postfix=postfix
+            postfix=postfix,
         ))
         self.register_metric(f"raw_pitch_rmse{postfix}", RawPitchRMSE())
         self.register_metric(f"raw_pitch_accuracy{postfix}", RawPitchAccuracy(
