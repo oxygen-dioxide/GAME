@@ -1,8 +1,19 @@
+import glob
 import pathlib
+from typing import Any
 
 import click
 
 from lib import logging
+
+
+_OPT_KEY_BATCH_SIZE = "batch_size"
+_OPT_KEY_NUM_WORKERS = "num_workers"
+_OPT_KEY_SEG_THRESHOLD = "seg_threshold"
+_OPT_KEY_SEG_RADIUS = "seg_radius"
+_OPT_KEY_SEG_D3PM_T0 = "t0"
+_OPT_KEY_SEG_D3PM_NSTEPS = "nsteps"
+_OPT_KEY_EST_THRESHOLD = "est_threshold"
 
 
 # noinspection PyUnusedLocal
@@ -44,6 +55,31 @@ def _validate_output_formats(ctx, param, value) -> set[str]:
         return formats
     except Exception as e:
         raise click.BadParameter(f"Invalid output formats: {e}")
+
+
+# noinspection PyUnusedLocal
+def _validate_path_or_glob(ctx, param, value) -> str:
+    try:
+        paths = []
+        for v in value:
+            if glob.has_magic(v):
+                paths.extend(glob.glob(v, recursive=True))
+            else:
+                paths.append(v)
+        if not paths:
+            raise FileNotFoundError(f"No files found for paths: {value}")
+        paths = [
+            pathlib.Path(p)
+            for p in paths
+        ]
+        for p in paths:
+            if not p.exists():
+                raise FileNotFoundError(f"Path does not exist: {p}")
+            if not p.is_file():
+                raise FileNotFoundError(f"Path is not a file: {p}")
+        return paths
+    except Exception as e:
+        raise click.BadParameter(f"Invalid path or glob: {e}")
 
 
 def _t0_nstep_to_ts(t0: float, nsteps: int) -> list[float]:
@@ -90,7 +126,10 @@ def main():
     pass
 
 
-def shared_options(func):
+def shared_options(func=None, *, defaults: dict[str, Any] = None):
+    if defaults is None:
+        defaults = {}
+
     options = [
         click.option(
             "-m", "--model", type=click.Path(
@@ -104,31 +143,37 @@ def shared_options(func):
             help="Language code for better segmentation if supported."
         ),
         click.option(
-            "--batch-size", type=click.IntRange(min=1), default=4, show_default=True,
+            "--batch-size", type=click.IntRange(min=1), show_default=True,
+            default=defaults.get(_OPT_KEY_BATCH_SIZE, 4),
             help="Batch size for inference."
         ),
         click.option(
-            "--num-workers", type=click.IntRange(min=0), default=0, show_default=True,
+            "--num-workers", type=click.IntRange(min=0), show_default=True,
+            default=defaults.get(_OPT_KEY_NUM_WORKERS, 0),
             help="Number of worker processes for dataloader."
         ),
         click.option(
             "--seg-threshold", type=click.FloatRange(
                 min=0, min_open=False, max=1, max_open=True
-            ), default=0.2, show_default=True,
+            ), show_default=True,
+            default=defaults.get(_OPT_KEY_SEG_THRESHOLD, 0.2),
             help="Boundary decoding threshold for segmentation model."
         ),
         click.option(
-            "--seg-radius", type=click.FloatRange(min=0.01), default=0.02, show_default=True,
+            "--seg-radius", type=click.FloatRange(min=0.01), show_default=True,
+            default=defaults.get(_OPT_KEY_SEG_RADIUS, 0.02),
             help="Boundary decoding radius for segmentation model."
         ),
         click.option(
             "--t0", "--seg-d3pm-t0", type=click.FloatRange(
                 min=0, min_open=False, max=1, max_open=True
-            ), default=0.0, show_default=True,
+            ), show_default=True,
+            default=defaults.get(_OPT_KEY_SEG_D3PM_T0, 0.0),
             help="Starting T value (t0) for segmentation model."
         ),
         click.option(
-            "--nsteps", "--seg-d3pm-nsteps", type=click.IntRange(min=1), default=8, show_default=True,
+            "--nsteps", "--seg-d3pm-nsteps", type=click.IntRange(min=1), show_default=True,
+            default=defaults.get(_OPT_KEY_SEG_D3PM_NSTEPS, 8),
             help="Number of D3PM sampling steps for segmentation model."
         ),
         click.option(
@@ -142,22 +187,36 @@ def shared_options(func):
         click.option(
             "--est-threshold", type=click.FloatRange(
                 min=0, min_open=False, max=1, max_open=True
-            ), default=0.2, show_default=True,
+            ), show_default=True,
+            default=defaults.get(_OPT_KEY_EST_THRESHOLD, 0.2),
             help="Presence detecting threshold for estimation model."
         ),
     ]
-    for option in reversed(options):
-        func = option(func)
-    return func
+
+    def decorator(f):
+        for option in reversed(options):
+            f = option(f)
+        return f
+
+    if func is None:
+        return decorator
+    else:
+        return decorator(func)
 
 
-@main.command(name="extract", help="Extract MIDI from single or multiple audio files.")
+@main.command(
+    name="extract",
+    help="Extract MIDI from single or multiple audio files."
+)
 @click.argument(
     "path", type=click.Path(
         exists=True, dir_okay=True, file_okay=True, readable=True, path_type=pathlib.Path
     ),
 )
-@shared_options
+@shared_options(defaults={
+    _OPT_KEY_SEG_D3PM_T0: 0.0,
+    _OPT_KEY_SEG_D3PM_NSTEPS: 8,
+})
 @click.option(
     "--input-formats", type=str, default="wav,flac,mp3,aac,ogg", show_default=True,
     callback=_validate_exts,
@@ -276,6 +335,115 @@ def extract(
             pitch_format=pitch_format,
             round_pitch=round_pitch,
         ))
+    infer_model(
+        model=model,
+        dataset=dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        callbacks=callbacks,
+        segmentation_threshold=seg_threshold,
+        segmentation_radius=seg_radius,
+        segmentation_d3pm_ts=ts,
+        estimation_threshold=est_threshold,
+    )
+    logging.success("Inference completed.", callback=rank_zero_info)
+
+
+@main.command(
+    name="align",
+    help="Generate aligned note labels with word boundaries in DiffSinger transcriptions."
+)
+@click.argument(
+    "paths", type=str, nargs=-1, metavar="PATH_OR_GLOB",
+    callback=_validate_path_or_glob,
+)
+@shared_options(defaults={
+    _OPT_KEY_SEG_D3PM_T0: 0.5,
+    _OPT_KEY_SEG_D3PM_NSTEPS: 4,
+})
+@click.option(
+    "--save-path", type=click.Path(
+        file_okay=True, dir_okay=False, writable=True, path_type=pathlib.Path
+    ),
+    help=(
+        "Path of the output file to save the updated transcriptions. "
+        "Ignored if multiple input files are provided. Overrides --save-name if provided."
+    )
+)
+@click.option(
+    "--save-name", type=str, default=None, show_default=False,
+    help=(
+            "Name of the updated transcription files to save. "
+            "Ignored if input is a single file and --save-path is provided. "
+            "If both --save-path and --save-name are not provided, the original files will be overwritten."
+    )
+)
+@click.option(
+    "--overwrite", is_flag=True, default=False, show_default=True,
+    help=(
+        "Whether to overwrite existing files when saving updated transcriptions."
+    )
+)
+def align(
+        paths: list[pathlib.Path],
+        model: pathlib.Path,
+        language: str,
+        batch_size: int,
+        num_workers: int,
+        seg_threshold: float,
+        seg_radius: float,
+        t0: float,
+        nsteps: int,
+        ts: list[float],
+        est_threshold: float,
+        save_path: pathlib.Path,
+        save_name: str,
+        overwrite: bool,
+):
+    if ts is None:
+        ts = _t0_nstep_to_ts(t0, nsteps)
+    if len(paths) > 1:
+        save_path = None
+    if save_path is not None:
+        save_name = save_path.name
+    inplace = (save_path is None) and (save_name is None)
+    if inplace and not overwrite:
+        raise ValueError("In-place saving requires --overwrite flag to be set.")
+    if not overwrite:
+        for p in paths:
+            if save_path is not None and save_path.exists():
+                raise FileExistsError(f"Output file already exists: {save_path}")
+            if save_name is not None:
+                output_file = p.parent / save_name
+                if output_file.exists():
+                    raise FileExistsError(f"Output file already exists: {output_file}")
+    save_dir = save_path.parent if save_path else None
+
+    from lightning_utilities.core.rank_zero import rank_zero_info
+    from inference.api import (
+        load_inference_model,
+        infer_model,
+    )
+    from inference.data import DiffSingerTranscriptionsDataset
+    from inference.callbacks import UpdateDiffSingerTranscriptionsCallback
+
+    model, lang_map = load_inference_model(model)
+    language_id = _get_language_id(language, lang_map)
+
+    sr = model.inference_config.features.audio_sample_rate
+    dataset = DiffSingerTranscriptionsDataset(
+        filelist=paths,
+        samplerate=sr,
+        language=language_id,
+    )
+    callbacks = [
+        UpdateDiffSingerTranscriptionsCallback(
+            filelist=paths,
+            overwrite=inplace,
+            save_dir=save_dir,
+            save_filename=save_name,
+        )
+    ]
     infer_model(
         model=model,
         dataset=dataset,

@@ -38,6 +38,9 @@ def load_config_for_inference(path: pathlib.Path, scope: int = 0) -> tuple[Model
     model_config.check(scope_mask=scope)
     inference_config.check(scope_mask=scope)
 
+    _log_config(model_config)
+    _log_config(inference_config)
+
     return model_config, inference_config
 
 
@@ -69,8 +72,6 @@ def load_inference_model(path: pathlib.Path) -> tuple[SegmentationEstimationInfe
         lang_map = None
 
     logging.info(f"Loaded model from \'{path}\'.", callback=rank_zero_info)
-    _log_config(model_config)
-    _log_config(inference_config)
 
     return model, lang_map
 

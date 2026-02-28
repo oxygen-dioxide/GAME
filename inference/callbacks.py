@@ -1,6 +1,7 @@
 import abc
 import csv
 import pathlib
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
@@ -16,6 +17,7 @@ __all__ = [
     "SaveFileCallback",
     "SaveMidiCallback",
     "SaveTextCallback",
+    "UpdateDiffSingerTranscriptionsCallback",
 ]
 
 
@@ -79,7 +81,7 @@ class SaveFileCallback(lightning.pytorch.callbacks.Callback, abc.ABC):
                 self.save_file(key, logger_fn=trainer.progress_bar_callback.print)
 
     def on_predict_epoch_end(self, trainer: lightning.pytorch.Trainer, *args, **kwargs) -> None:
-        for key in list(self.counters.keys()):
+        for key in self.counters.keys():
             self.save_file(key, logger_fn=trainer.progress_bar_callback.print)
 
     def save_file(self, key: str, logger_fn: Callable) -> None:
@@ -188,3 +190,87 @@ class SaveTextCallback(SaveFileCallback):
                         "pitch": pitch,
                     })
             logging.info(f"Saved CSV file: {filepath.as_posix()}", callback=logger_fn)
+
+
+class UpdateDiffSingerTranscriptionsCallback(lightning.pytorch.callbacks.Callback):
+    def __init__(
+            self, filelist: list[pathlib.Path],
+            overwrite: bool = False,
+            save_dir: str | pathlib.Path = None,
+            save_filename: str = "transcriptions-midi.csv",
+    ):
+        super().__init__()
+        self.overwrite = overwrite
+        if isinstance(save_dir, str):
+            save_dir = pathlib.Path(save_dir)
+        self.save_dir = save_dir
+        self.save_filename = save_filename
+        self.index_map: dict[str, OrderedDict[str, dict[str, Any]]] = {}
+        self.lengths: dict[str, int] = {}
+        self.counters: dict[str, int] = {}
+        for index in filelist:
+            with open(index, "r", encoding="utf8") as f:
+                items = list(csv.DictReader(f))
+                o_dict = OrderedDict()
+                for item in items:
+                    o_dict[item["name"]] = item
+                key = index.as_posix()
+                self.index_map[key] = o_dict
+                self.lengths[key] = len(items)
+                self.counters[key] = 0
+
+    def on_predict_batch_end(
+            self,
+            trainer: lightning.pytorch.Trainer,
+            pl_module: lightning.pytorch.LightningModule,
+            outputs: dict[str, torch.Tensor],
+            batch: dict[str, Any],
+            *args, **kwargs
+    ) -> None:
+        batch_size = batch["size"]
+        for i in range(batch_size):
+            index: str = batch["index"][i]
+            name: str = batch["name"][i]
+            durations = outputs["durations"][i]
+            scores = outputs["scores"][i]
+            presence = outputs["presence"][i]
+            valid = durations > 0
+            durations = durations[valid].tolist()
+            scores = scores[valid].tolist()
+            presence = presence[valid].tolist()
+            note_seq = [
+                librosa.midi_to_note(score, unicode=False, cents=True) if presence else "rest"
+                for score, presence in zip(scores, presence)
+            ]
+            note_dur = [f"{dur:.3f}" for dur in durations]
+            item = self.index_map[index][name]
+            item["note_seq"] = " ".join(note_seq)
+            item["note_dur"] = " ".join(note_dur)
+            item.pop("note_glide", None)
+            self.counters[index] += 1
+            if self.counters[index] >= self.lengths[index]:
+                self.flush(index, logger_fn=trainer.progress_bar_callback.print)
+
+    def on_predict_epoch_end(self, trainer: lightning.pytorch.Trainer, *args, **kwargs) -> None:
+        for index in self.counters.keys():
+            self.flush(index, logger_fn=trainer.progress_bar_callback.print)
+
+    def flush(self, key: str, logger_fn: Callable):
+        items = list(self.index_map[key].values())
+        index = pathlib.Path(key)
+        if self.overwrite:
+            save_path = index
+        elif self.save_dir is not None:
+            save_path = self.save_dir / self.save_filename
+        else:
+            save_path = index.parent / self.save_filename
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        with save_path.open(encoding="utf8", mode="w", newline="") as f:
+            fieldnames = list(items[0].keys())
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(items)
+        del self.index_map[key]
+        del self.lengths[key]
+        del self.counters[key]
+        logging.info(f"Saved transcriptions: {save_path.as_posix()}", callback=logger_fn)
