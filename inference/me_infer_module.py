@@ -80,7 +80,7 @@ class InferenceModule(lightning.pytorch.LightningModule):
 
     def test_step(self, batch: dict[str, Tensor], *args, **kwargs) -> None:
         spectrogram = batch["spectrogram"]
-        if self.model_config.use_languages:
+        if self.model.model_config.use_languages:
             language_ids = batch["language_id"]
         else:
             language_ids = None
@@ -98,7 +98,7 @@ class InferenceModule(lightning.pytorch.LightningModule):
             threshold=torch.tensor(self.config.boundary_decoding_threshold).to(spectrogram),
             radius=torch.tensor(self.config.boundary_decoding_radius).to(regions),
         )
-        durations_frame_pred = regions_to_durations(regions, max_n=max_n_pred)  # [B, N]
+        durations_frame_pred = regions_to_durations(regions_pred, max_n=max_n_pred)  # [B, N]
         durations_pred = durations_frame_pred * self.timestep
         presence_pred, scores_pred = self.model.forward_estimator(
             x_est, regions=regions_pred, mask=mask, max_n=max_n_pred,

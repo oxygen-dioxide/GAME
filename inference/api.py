@@ -1,5 +1,6 @@
 import json
 import pathlib
+from typing import Literal
 
 import lightning.pytorch.callbacks
 import torch
@@ -16,6 +17,7 @@ from .me_infer import SegmentationEstimationInferenceModel
 
 __all__ = [
     "load_config_for_inference",
+    "load_config_for_evaluation",
     "load_state_dict_for_inference",
     "load_inference_model",
     "infer_model",
@@ -45,6 +47,22 @@ def load_config_for_inference(
     _log_config(inference_config)
 
     return model_config, inference_config
+
+
+def load_config_for_evaluation(
+        path: pathlib.Path,
+        scope: int = 0
+) -> ValidationConfig:
+    if not path.is_file():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    with open(path, "r", encoding="utf8") as f:
+        config = yaml.safe_load(f)
+    validation_config = ValidationConfig.model_validate(config["training"]["validation"], scope=scope)
+    validation_config.check(scope_mask=scope)
+
+    _log_config(validation_config)
+
+    return validation_config
 
 
 def load_state_dict_for_inference(path: pathlib.Path, ema=True) -> dict[str, Tensor]:
@@ -82,24 +100,13 @@ def load_inference_model(path: pathlib.Path) -> tuple[SegmentationEstimationInfe
 def infer_model(
         model: SegmentationEstimationInferenceModel,
         dataset: torch.utils.data.Dataset,
+        config: ValidationConfig,
         batch_size: int,
         num_workers: int,
         callbacks: list[lightning.pytorch.callbacks.Callback],
-        segmentation_threshold: float = 0.3,
-        segmentation_radius: float = 0.02,
-        segmentation_d3pm_ts: list[float] = None,
-        estimation_threshold: float = 0.2,
+        mode: Literal["predict", "evaluate"] = "predict",
 ):
-    # noinspection PyArgumentList
-    module = InferenceModule(
-        model=model,
-        config=ValidationConfig(
-            d3pm_sample_ts=segmentation_d3pm_ts,
-            boundary_decoding_threshold=segmentation_threshold,
-            boundary_decoding_radius=round(segmentation_radius / model.timestep),
-            note_presence_threshold=estimation_threshold,
-        ),
-    )
+    module = InferenceModule(model=model, config=config)
     trainer = lightning.pytorch.Trainer(
         logger=False,
         enable_checkpointing=False,
@@ -114,4 +121,9 @@ def infer_model(
         persistent_workers=num_workers > 0,
         collate_fn=dataset.collate if hasattr(dataset, "collate") else None,
     )
-    trainer.predict(module, dataloader)
+    if mode == "predict":
+        trainer.predict(module, dataloader)
+    elif mode == "evaluate":
+        trainer.test(module, dataloader)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")

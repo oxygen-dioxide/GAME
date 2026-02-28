@@ -284,12 +284,12 @@ class UpdateDiffSingerTranscriptionsCallback(lightning.pytorch.callbacks.Callbac
 
 
 class VisualizeNoteComparisonCallback(lightning.pytorch.callbacks.Callback):
-    def __init__(self, save_dir: str | pathlib.Path, digits: int = None):
+    def __init__(self, save_dir: str | pathlib.Path, num_digits: int = None):
         super().__init__()
         if isinstance(save_dir, str):
             save_dir = pathlib.Path(save_dir)
         self.save_dir = save_dir
-        self.digits = digits
+        self.num_digits = num_digits
 
     def on_test_batch_end(
             self,
@@ -301,7 +301,7 @@ class VisualizeNoteComparisonCallback(lightning.pytorch.callbacks.Callback):
     ) -> None:
         for i in range(len(batch["indices"])):
             idx = batch["indices"][i].item()
-            title = batch["name"][i]
+            title = batch["names"][i]
             N = batch["N"][i].item()
             scores_gt = batch["scores"][i, :N]
             presence_gt = batch["presence"][i, :N]
@@ -322,8 +322,8 @@ class VisualizeNoteComparisonCallback(lightning.pytorch.callbacks.Callback):
             )
 
             name = str(idx)
-            if self.digits is not None:
-                name = name.zfill(self.digits)
+            if self.num_digits is not None:
+                name = name.zfill(self.num_digits)
 
             save_path = self.save_dir / f"{name}.jpg"
             save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -348,12 +348,15 @@ class ExportMetricSummaryCallback(lightning.pytorch.callbacks.Callback):
         for name, metric in pl_module.metrics.items():
             value = metric.compute()
             if isinstance(value, dict):
-                summary.update(value)
+                for k, v in value.items():
+                    summary[k] = v.item()
             else:
-                summary[name] = value
+                summary[name] = value.item()
+        summary_str = json.dumps(summary, indent=4)
+        trainer.progress_bar_callback.print(summary_str)
         self.save_path.parent.mkdir(parents=True, exist_ok=True)
         with self.save_path.open(encoding="utf8", mode="w") as f:
-            json.dump(summary, f, indent=4)
+            f.write(summary_str)
         logging.info(
             f"Saved metric summary: {self.save_path.as_posix()}",
             callback=trainer.progress_bar_callback.print

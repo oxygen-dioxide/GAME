@@ -327,9 +327,9 @@ class TrainerConfig(ConfigBaseModel):
 class ValidationConfig(ConfigBaseModel):
     max_plots: int = Field(100, ge=0)
     parallel_dirty_metrics: bool = Field(True)
-    d3pm_sample_t0: float = Field(0.0, ge=0, exclude=True)  # Only given during inference and evaluation
+    d3pm_sample_t0: float = Field(0.0, ge=0)
     d3pm_sample_steps: int = Field(8, gt=0)
-    d3pm_sample_ts: list[float] = Field(None, exclude=True)  # Only given during inference and evaluation
+    d3pm_sample_ts: list[float] = Field(None)
     boundary_decoding_threshold: float = Field(0.3, gt=0, le=1)
     boundary_decoding_radius: int = Field(2, gt=0)
     boundary_matching_tolerance: int = Field(5, ge=0)

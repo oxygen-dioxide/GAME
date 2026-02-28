@@ -87,7 +87,7 @@ def train_model(
         cfg_load = load_raw_config(file)
         if cfg_load != cfg.model_dump():
             raise RuntimeError(
-                f"Contents of '{file}' do not match the features configuration. "
+                f"Contents of '{file}' do not match the configuration. "
                 f"If you edited the configuration file, please re-binarize the dataset."
             )
 

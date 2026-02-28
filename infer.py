@@ -5,7 +5,7 @@ from typing import Any
 import click
 
 from lib import logging
-
+from lib.config.schema import ValidationConfig
 
 _OPT_KEY_BATCH_SIZE = "batch_size"
 _OPT_KEY_NUM_WORKERS = "num_workers"
@@ -169,7 +169,7 @@ def shared_options(func=None, *, defaults: dict[str, Any] = None):
                 min=0, min_open=False, max=1, max_open=True
             ), show_default=True,
             default=defaults.get(_OPT_KEY_SEG_D3PM_T0, 0.0),
-            help="Starting T value (t0) for segmentation model."
+            help="Starting T value (t0) of D3PM for segmentation model."
         ),
         click.option(
             "--nsteps", "--seg-d3pm-nsteps", type=click.IntRange(min=1), show_default=True,
@@ -335,16 +335,19 @@ def extract(
             pitch_format=pitch_format,
             round_pitch=round_pitch,
         ))
+    # noinspection PyArgumentList
     infer_model(
         model=model,
         dataset=dataset,
+        config=ValidationConfig(
+            d3pm_sample_ts=ts,
+            boundary_decoding_threshold=seg_threshold,
+            boundary_decoding_radius=round(seg_radius / model.timestep),
+            note_presence_threshold=est_threshold,
+        ),
         batch_size=batch_size,
         num_workers=num_workers,
         callbacks=callbacks,
-        segmentation_threshold=seg_threshold,
-        segmentation_radius=seg_radius,
-        segmentation_d3pm_ts=ts,
-        estimation_threshold=est_threshold,
     )
     logging.success("Inference completed.", callback=rank_zero_info)
 
@@ -454,16 +457,19 @@ def align(
             save_filename=save_name,
         )
     ]
+    # noinspection PyArgumentList
     infer_model(
         model=model,
         dataset=dataset,
+        config=ValidationConfig(
+            d3pm_sample_ts=ts,
+            boundary_decoding_threshold=seg_threshold,
+            boundary_decoding_radius=round(seg_radius / model.timestep),
+            note_presence_threshold=est_threshold,
+        ),
         batch_size=batch_size,
         num_workers=num_workers,
         callbacks=callbacks,
-        segmentation_threshold=seg_threshold,
-        segmentation_radius=seg_radius,
-        segmentation_d3pm_ts=ts,
-        estimation_threshold=est_threshold,
     )
     logging.success("Inference completed.", callback=rank_zero_info)
 
