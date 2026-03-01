@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -75,6 +76,20 @@ class RMSnorm(torch.nn.Module):
     def forward(self, x):
         output = self._norm(x)
         return output * self.weight
+
+
+class RegionBias(nn.Module):
+    """Single learnable decay, shared across heads. Output [B, 1, Lq, Lk]."""
+    def __init__(self, alpha=1.0, learnable=True):
+        super().__init__()
+        if learnable:
+            self.log_alpha = nn.Parameter(torch.tensor(math.log(alpha)))
+        else:
+            self.register_buffer('log_alpha', torch.tensor(math.log(alpha)))
+
+    def forward(self, q_region_idx, k_region_idx):
+        dist = (q_region_idx.unsqueeze(-1) - k_region_idx.unsqueeze(-2)).abs().float()
+        return (-self.log_alpha.exp() * dist).unsqueeze(1)
 
 
 def build_join_attention_mask(regions, region_token_num, max_n, t_mask, n_mask):
@@ -173,7 +188,6 @@ class JoinAtention(nn.Module):
                  dropout_attn: float = 0.0,
                  out_drop_x: float = 0.0,
                  out_drop_pool: float = 0.0,
-
                  ):
         super().__init__()
 
@@ -646,12 +660,17 @@ class JEBFBackbone(nn.Module): #todo 其他的到时候再说
             use_out_norm: bool = True,
             skip_fist_ffn=False,
             pool_out_dim: int = None,
+            use_region_bias: bool = False,
+            bias_alpha: float = 2.35,
+            bias_learnable: bool = False,
     ):
         super().__init__()
         self.region_token_num = region_token_num
         self.use_out_norm = use_out_norm
         self.pool_out_dim = pool_out_dim if pool_out_dim is not None else out_dim
-
+        self.use_region_bias = use_region_bias
+        if use_region_bias:
+            self.region_bias = RegionBias(alpha=bias_alpha, learnable=bias_learnable)
         # Input projection
         self.input_proj = nn.Linear(in_dim, dim)
 
@@ -690,6 +709,53 @@ class JEBFBackbone(nn.Module): #todo 其他的到时候再说
         self.output_proj_x = nn.Linear(dim, out_dim)
         self.output_proj_pool = nn.Linear(dim, self.pool_out_dim)
 
+
+    def _build_region_bias_mask(self, regions, region_token_num, max_n, t_mask, n_mask):
+        """
+        Build float attention mask with region bias for cross-stream attention.
+        Same-stream: 0.0 (or -10000 for invalid)
+        Cross-stream: region_bias decay (or -10000 for invalid)
+        """
+        B, T = regions.shape
+        R = region_token_num
+        P = max_n * R
+        device = regions.device
+
+        # Pool tokens region indices
+        pool_region = torch.arange(1, max_n + 1, device=device) \
+            .unsqueeze(-1).expand(-1, R).reshape(1, P).expand(B, -1)
+        full_region = torch.cat([pool_region, regions], dim=-1)  # [B, P+T]
+
+        # Valid masks
+        pool_valid = n_mask.unsqueeze(-1).expand(-1, -1, R).reshape(B, P)
+        full_valid = torch.cat([pool_valid, t_mask], dim=-1)  # [B, P+T]
+
+        # Is pool token
+        is_pool = torch.cat([
+            torch.ones(B, P, device=device, dtype=torch.bool),
+            torch.zeros(B, T, device=device, dtype=torch.bool),
+        ], dim=-1)  # [B, P+T]
+
+        # Same stream mask
+        same_stream = is_pool.unsqueeze(-1) == is_pool.unsqueeze(-2)  # [B, P+T, P+T]
+
+        # Valid pairs
+        valid_pair = full_valid.unsqueeze(-1) & full_valid.unsqueeze(-2)  # [B, P+T, P+T]
+
+        # Base mask: -10000 for invalid, 0 for valid
+        base_mask = torch.where(valid_pair, 0.0, -10000.0)  # [B, P+T, P+T]
+
+        # Region bias for cross-stream
+        region_decay = self.region_bias(full_region, full_region)  # [B, 1, P+T, P+T]
+        region_decay = region_decay.squeeze(1)  # [B, P+T, P+T]
+
+        # Apply region bias only to cross-stream (different stream)
+        # Same-stream: keep 0, Cross-stream: add region decay
+        attn_bias = torch.where(same_stream, base_mask, base_mask + region_decay)
+
+        return attn_bias.unsqueeze(1)  # [B, 1, P+T, P+T]
+
+
     def forward(self, x, regions, t_mask, n_mask, max_n=None):
         """
         Args:
@@ -717,7 +783,13 @@ class JEBFBackbone(nn.Module): #todo 其他的到时候再说
         pool = self.pool_token_gen(x, regions, max_n, n_mask)  # [B, P, dim]
 
         # Build attention mask
-        attn_mask = build_join_attention_mask(regions, R, max_n, t_mask, n_mask)  # [B, 1, P+T, P+T]
+
+
+        # Use region bias (soft) or hard mask
+        if self.use_region_bias:
+            attn_mask = self._build_region_bias_mask(regions, R, max_n, t_mask, n_mask)
+        else:
+            attn_mask = build_join_attention_mask(regions, R, max_n, t_mask, n_mask)  # [B, 1, P+T, P+T]
 
         # JEBF layers
         for layer in self.layers:
@@ -732,5 +804,3 @@ class JEBFBackbone(nn.Module): #todo 其他的到时候再说
         out_pool = self.output_proj_pool(pool)  # [B, P, pool_out_dim]
 
         return out_x, out_pool
-
-
