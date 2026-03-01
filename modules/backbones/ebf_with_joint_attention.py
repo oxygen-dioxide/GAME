@@ -296,6 +296,217 @@ class JoinAtention(nn.Module):
         return pool, x
 
 
+def build_split_attention_masks(regions, region_token_num, max_n, t_mask, n_mask, region_bias=None):
+    """
+    Pre-build masks for SplitJoinAtention to avoid rebuilding every forward pass.
+    
+    Returns:
+        pp_mask: [B, 1, P, P] pool->pool padding mask (None if no padding)
+        xx_mask: [B, 1, T, T] x->x padding mask (None if no padding)
+        px_mask: [B, 1, P, T] pool->x cross-stream mask with region bias
+        xp_mask: [B, 1, T, P] x->pool cross-stream mask with region bias
+        # pool_region: [B, P] region indices for pool tokens
+        # pool_valid: [B, P] valid mask for pool tokens
+    """
+    B, T = regions.shape
+    R = region_token_num
+    P = max_n * R
+    device = regions.device
+
+    # Region indices
+    pool_region = torch.arange(1, max_n + 1, device=device) \
+        .unsqueeze(-1).expand(-1, R).reshape(1, P).expand(B, -1)
+    pool_valid = n_mask.unsqueeze(-1).expand(-1, -1, R).reshape(B, P)
+
+    def _build_pad_bias(valid):
+        mask = valid.unsqueeze(-1) & valid.unsqueeze(-2)
+        return torch.where(mask, 0.0, -10000.0).unsqueeze(1)
+
+    def _build_cross_bias(q_region, k_region, q_valid, k_valid):
+        pad_mask = q_valid.unsqueeze(-1) & k_valid.unsqueeze(-2)
+        pad_bias = torch.where(pad_mask, 0.0, -10000.0).unsqueeze(1)
+        if region_bias is not None:
+            decay = region_bias(q_region, k_region)
+            return pad_bias + decay
+        return pad_bias
+
+    # Same-stream masks (None if no padding for flash path)
+    pp_mask = None if pool_valid.all() else _build_pad_bias(pool_valid)
+    xx_mask = None if t_mask.all() else _build_pad_bias(t_mask)
+
+    # Cross-stream masks
+    px_mask = _build_cross_bias(pool_region, regions, pool_valid, t_mask)
+    xp_mask = _build_cross_bias(regions, pool_region, t_mask, pool_valid)
+
+    return pp_mask, xx_mask, px_mask, xp_mask
+    #, pool_region, pool_valid
+
+
+class SplitJoinAtention(nn.Module):
+    """
+    4-way split attention (drop-in replacement for JoinAtention):
+    - pool->pool: same-stream with RoPE
+    - x->x: same-stream with RoPE
+    - pool->x: cross-stream with RoPE + region bias decay
+    - x->pool: cross-stream with RoPE + region bias decay
+
+    Each stream gets its own normalized attention, results are summed.
+    Supports 3 RoPE modes: local, global, mixed (same as JoinAtention).
+    Can accept pre-built masks via split_masks parameter for efficiency.
+    """
+
+    def __init__(self, dim,
+                 num_heads,
+                 head_dim,
+                 region_token_num=1,
+                 qk_norm=True,
+                 use_rope=True,
+                 rope_mode='mixed',
+                 use_pool_offset=False,
+                 theta=10000.0,
+                 dropout_attn: float = 0.0,
+                 out_drop_x: float = 0.0,
+                 out_drop_pool: float = 0.0,
+
+                 ):
+        super().__init__()
+
+        self.out_drop_x = nn.Dropout(out_drop_x) if out_drop_x > 0. else nn.Identity()
+        self.out_drop_pool = nn.Dropout(out_drop_pool) if out_drop_pool > 0. else nn.Identity()
+        self.region_token_num = region_token_num
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+
+        self.rope_mode = rope_mode
+        self.use_rope = use_rope
+        self.use_pool_offset = use_pool_offset
+        self.dropout_attn = dropout_attn
+
+
+        attn_dim = num_heads * head_dim
+
+        self.pool_qkv = nn.Linear(dim, attn_dim * 3, bias=True)
+        self.x_qkv = nn.Linear(dim, attn_dim * 3, bias=True)
+
+        self.qk_norm = qk_norm
+        if qk_norm:
+            self.pool_q_norm = RMSnorm(head_dim)
+            self.pool_k_norm = RMSnorm(head_dim)
+            self.x_q_norm = RMSnorm(head_dim)
+            self.x_k_norm = RMSnorm(head_dim)
+
+        self.pool_out = nn.Linear(attn_dim, dim, bias=True)
+        self.x_out = nn.Linear(attn_dim, dim, bias=True)
+
+        self.pool_norm = RMSnorm(dim)
+        self.x_norm = RMSnorm(dim)
+
+        # RoPE for all attention paths (same-stream and cross-stream)
+        if use_rope:
+            if rope_mode == 'mixed':
+                self.rope = RegionRoPE(head_dim, mode='global', theta=theta)
+            else:
+                self.rope = RegionRoPE(head_dim, mode='local', theta=theta)
+
+        # Region bias for cross-stream attention
+
+
+    def _to_heads(self, x):
+        return rearrange(x, 'b t (h d) -> b h t d', h=self.num_heads)
+
+    def forward(self, pool, x, regions, t_mask, n_mask, attn_mask, max_n=None,):
+        """
+        Args:
+            pool, x, regions, t_mask, n_mask, attn_mask: same as JoinAtention
+            max_n: max number of regions
+            split_masks: optional pre-built masks tuple (pp_mask, xx_mask, px_mask, xp_mask, pool_region, pool_valid)
+                         If None, masks are built internally. Pass for efficiency when reusing masks.
+        """
+        if max_n is None:
+            max_n = n_mask.shape[1]
+
+        R = self.region_token_num
+        P = max_n * R
+        B = x.shape[0]
+        T = regions.shape[1]
+        device = x.device
+        dp = self.dropout_attn if self.training else 0.0
+
+        # Build or use pre-built masks
+
+        pp_mask, xx_mask, px_mask, xp_mask=attn_mask
+
+
+
+        # Pre-norm
+        pool_normed = self.pool_norm(pool)
+        x_normed = self.x_norm(x)
+
+        # QKV
+        pool_q, pool_k, pool_v = self.pool_qkv(pool_normed).chunk(3, dim=-1)
+        x_q, x_k, x_v = self.x_qkv(x_normed).chunk(3, dim=-1)
+
+        pool_q, pool_k, pool_v = map(self._to_heads, (pool_q, pool_k, pool_v))
+        x_q, x_k, x_v = map(self._to_heads, (x_q, x_k, x_v))
+
+        # QK Norm
+        if self.qk_norm:
+            pool_q = self.pool_q_norm(pool_q)
+            pool_k = self.pool_k_norm(pool_k)
+            x_q = self.x_q_norm(x_q)
+            x_k = self.x_k_norm(x_k)
+
+        # Apply RoPE based on mode (for all 4 attention paths)
+        if self.use_rope:
+            if self.rope_mode == 'local':
+                pool_lpos, x_lpos = compute_positions_local(regions, R, max_n, self.use_pool_offset)
+                pool_q_r, pool_k_r = self.rope(pool_q, pool_k, pool_lpos.float(), pool_lpos.float())
+                x_q_r, x_k_r = self.rope(x_q, x_k, x_lpos.float(), x_lpos.float())
+            elif self.rope_mode == 'global':
+                pool_pos = torch.arange(P, device=device).unsqueeze(0).expand(B, -1).float()
+                x_pos = torch.arange(T, device=device).unsqueeze(0).expand(B, -1).float()
+                pool_q_r, pool_k_r = self.rope(pool_q, pool_k, pool_pos, pool_pos)
+                x_q_r, x_k_r = self.rope(x_q, x_k, x_pos, x_pos)
+            elif self.rope_mode == 'mixed':
+                pool_gpos = torch.arange(P, device=device).unsqueeze(0).expand(B, -1).float()
+                x_gpos = torch.arange(T, device=device).unsqueeze(0).expand(B, -1).float()
+                pool_lpos, x_lpos = compute_positions_local(regions, R, max_n, self.use_pool_offset)
+                pool_q_r, pool_k_r = self.rope(pool_q, pool_k, pool_gpos, pool_gpos, pool_lpos.float(), pool_lpos.float())
+                x_q_r, x_k_r = self.rope(x_q, x_k, x_gpos, x_gpos, x_lpos.float(), x_lpos.float())
+        else:
+            pool_q_r, pool_k_r = pool_q, pool_k
+            x_q_r, x_k_r = x_q, x_k
+
+        # --- 1. pool -> pool (same-stream) ---
+
+        pp_out = F.scaled_dot_product_attention(pool_q_r, pool_k_r, pool_v, attn_mask=pp_mask, dropout_p=dp)
+
+        # --- 2. x -> x (same-stream) ---
+
+        xx_out = F.scaled_dot_product_attention(x_q_r, x_k_r, x_v, attn_mask=xx_mask, dropout_p=dp)
+
+        # --- 3. pool -> x (cross-stream with RoPE) ---
+        px_out = F.scaled_dot_product_attention(pool_q_r, x_k_r, x_v, attn_mask=px_mask, dropout_p=dp)
+
+        # --- 4. x -> pool (cross-stream with RoPE) ---
+        xp_out = F.scaled_dot_product_attention(x_q_r, pool_k_r, pool_v, attn_mask=xp_mask, dropout_p=dp)
+
+        # Combine: sum same-stream + cross-stream
+        pool_attn = rearrange(pp_out + px_out, 'b h t d -> b t (h d)')
+        x_attn = rearrange(xx_out + xp_out, 'b h t d -> b t (h d)')
+
+        pool_attn = self.pool_out(pool_attn)
+        x_attn = self.x_out(x_attn)
+        pool = self.out_drop_pool(pool_attn)
+        x = self.out_drop_x(x_attn)
+
+        # Mask output
+        pool = pool * n_mask.unsqueeze(-1).expand(-1, -1, R).reshape(B, P, 1).float()
+        x = x * t_mask.unsqueeze(-1).float()
+
+        return pool, x
+
+
 class PJAC(nn.Module):
     def __init__(
             self, dim,
@@ -320,12 +531,24 @@ class PJAC(nn.Module):
             dropout_attn: float = 0.0,
             attn_out_drop_x: float = 0.0,
             attn_out_drop_pool: float = 0.0,
+            attn_type: str = 'joint',
+
     ):
         super().__init__()
-        self.jattn = JoinAtention(dim=dim, num_heads=num_heads, region_token_num=region_token_num, qk_norm=qk_norm,
-                                  use_rope=use_rope, rope_mode=rope_mode, use_pool_offset=use_pool_offset, theta=theta,
-                                  dropout_attn=dropout_attn, out_drop_x=attn_out_drop_x,
-                                  out_drop_pool=attn_out_drop_pool, head_dim=head_dim)
+        self.attn_type = attn_type
+        if attn_type == 'joint':
+            self.jattn = JoinAtention(dim=dim, num_heads=num_heads, region_token_num=region_token_num, qk_norm=qk_norm,
+                                      use_rope=use_rope, rope_mode=rope_mode, use_pool_offset=use_pool_offset, theta=theta,
+                                      dropout_attn=dropout_attn, out_drop_x=attn_out_drop_x,
+                                      out_drop_pool=attn_out_drop_pool, head_dim=head_dim)
+        elif attn_type == 'split':
+            self.jattn = SplitJoinAtention(dim=dim, num_heads=num_heads, region_token_num=region_token_num, qk_norm=qk_norm,
+                                           use_rope=use_rope, rope_mode=rope_mode, use_pool_offset=use_pool_offset, theta=theta,
+                                           dropout_attn=dropout_attn, out_drop_x=attn_out_drop_x,
+                                           out_drop_pool=attn_out_drop_pool, head_dim=head_dim,
+                                          )
+        else:
+            raise ValueError(f"Unknown attn_type: {attn_type}")
 
         self.c_x = CgMLP(
             dim, kernel_size=c_kernel_size_x,
@@ -399,7 +622,9 @@ class JEBF(nn.Module):
             attn_out_drop_x: float = 0.0,
             attn_out_drop_pool: float = 0.0,
 
-            use_ls=True, ffn_type='glu', ffn_latent_drop=0.1, ffn_out_drop=0.1, skip_fist_ffn=False
+            use_ls=True, ffn_type='glu', ffn_latent_drop=0.1, ffn_out_drop=0.1, skip_fist_ffn=False,
+            attn_type: str = 'joint',
+
     ):
         super().__init__()
         self.skip_fist_ffn = skip_fist_ffn
@@ -477,7 +702,8 @@ class JEBF(nn.Module):
                          c_out_drop_pool=c_out_drop_pool, c_latent_drop_pool=c_latent_drop_pool,
                          region_token_num=region_token_num, qk_norm=qk_norm, use_rope=use_rope, rope_mode=rope_mode,
                          use_pool_offset=use_pool_offset, theta=theta, dropout_attn=dropout_attn,
-                         attn_out_drop_x=attn_out_drop_x, attn_out_drop_pool=attn_out_drop_pool)
+                         attn_out_drop_x=attn_out_drop_x, attn_out_drop_pool=attn_out_drop_pool,
+                         attn_type=attn_type,)
         if not skip_fist_ffn:
             self.norm_ffn1_x = RMSnorm(dim)
             self.norm_ffn1_pool = RMSnorm(dim)
@@ -660,6 +886,7 @@ class JEBFBackbone(nn.Module): #todo 其他的到时候再说
             use_out_norm: bool = True,
             skip_fist_ffn=False,
             pool_out_dim: int = None,
+            attn_type: str = 'joint',
             use_region_bias: bool = False,
             bias_alpha: float = 2.35,
             bias_learnable: bool = False,
@@ -668,8 +895,9 @@ class JEBFBackbone(nn.Module): #todo 其他的到时候再说
         self.region_token_num = region_token_num
         self.use_out_norm = use_out_norm
         self.pool_out_dim = pool_out_dim if pool_out_dim is not None else out_dim
+        self.attn_type = attn_type
         self.use_region_bias = use_region_bias
-        if use_region_bias:
+        if use_region_bias :
             self.region_bias = RegionBias(alpha=bias_alpha, learnable=bias_learnable)
         # Input projection
         self.input_proj = nn.Linear(in_dim, dim)
@@ -697,7 +925,8 @@ class JEBFBackbone(nn.Module): #todo 其他的到时候再说
                 attn_out_drop_pool=attn_out_drop_pool,
                 use_ls=use_ls, ffn_type=ffn_type,
                 ffn_latent_drop=ffn_latent_drop, ffn_out_drop=ffn_out_drop,
-                skip_fist_ffn=skip_fist_ffn,  # skip first FFN for first layer #todo
+                skip_fist_ffn=skip_fist_ffn,
+                attn_type=attn_type,
             )
             for i in range(num_layers)
         ])
@@ -784,12 +1013,22 @@ class JEBFBackbone(nn.Module): #todo 其他的到时候再说
 
         # Build attention mask
 
+        if self.attn_type=='joint':
+            # Use region bias (soft) or hard mask
+            if self.use_region_bias:
+                attn_mask = self._build_region_bias_mask(regions, R, max_n, t_mask, n_mask)
+            else:
+                attn_mask = build_join_attention_mask(regions, R, max_n, t_mask, n_mask)  # [B, 1, P+T, P+T]
+        elif self.attn_type=='split':
 
-        # Use region bias (soft) or hard mask
-        if self.use_region_bias:
-            attn_mask = self._build_region_bias_mask(regions, R, max_n, t_mask, n_mask)
+            region_bias = self.region_bias if self.use_region_bias else None
+            attn_mask = build_split_attention_masks(
+                regions, R, max_n, t_mask, n_mask, region_bias
+            )
+            pass
+
         else:
-            attn_mask = build_join_attention_mask(regions, R, max_n, t_mask, n_mask)  # [B, 1, P+T, P+T]
+            raise ValueError(f"Unknown attn_type: {self.attn_type}")
 
         # JEBF layers
         for layer in self.layers:
