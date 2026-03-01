@@ -144,7 +144,31 @@ def build_join_attention_mask(regions, region_token_num, max_n, t_mask, n_mask):
 
     return (attn_allowed & valid_pair).unsqueeze(1)
 
+def regions_to_local_positions_v3(regions):
+    """O(T) cumsum, ONNX compatible (no cummax)"""
+    B, T = regions.shape
+    device = regions.device
 
+    shifted = F.pad(regions[:, :-1], (1, 0), value=0)
+    is_start = (regions != shifted)
+
+    ones = torch.ones_like(regions, dtype=torch.long)
+    cumsum = ones.cumsum(dim=-1)
+
+    start_cumsum = torch.where(is_start, cumsum, torch.zeros_like(cumsum))
+    segment_id = is_start.long().cumsum(dim=-1)
+
+    # 关键修复：只对 is_start 为 True 的位置进行 scatter
+    # 将 is_start 为 False 的位置的索引改为 0，这样它们只会写入 segment_start[0]（我们不使用）
+    masked_segment_id = torch.where(is_start, segment_id, torch.zeros_like(segment_id))
+
+    segment_start = torch.zeros(B, T + 1, device=device, dtype=cumsum.dtype)
+    segment_start.scatter_(1, masked_segment_id, start_cumsum)
+
+    broadcast_start = segment_start.gather(1, segment_id)
+
+    local_pos = cumsum - broadcast_start
+    return local_pos * (regions > 0).long()
 def regions_to_local_positions_v2(regions):
     """O(T) cumsum"""
     B, T = regions.shape
@@ -177,7 +201,7 @@ def compute_positions_local(regions, region_token_num, max_n, use_pool_offset=Fa
     else:
         offsets = torch.zeros(R, device=device, dtype=torch.long)
     pool_pos = offsets.unsqueeze(0).expand(max_n, -1).reshape(1, P).expand(B, -1)
-    x_local = regions_to_local_positions_v2(regions)
+    x_local = regions_to_local_positions_v3(regions)
     x_pos = x_local + R
     x_pos = x_pos * (regions > 0).long()
     return pool_pos, x_pos
