@@ -25,7 +25,7 @@ A `config.json` carries the information needed for ONNX model inference. Structu
 ## Modules and functions
 
 | name           | description                                                                   |
-|----------------|-------------------------------------------------------------------------------|
+|:---------------|:------------------------------------------------------------------------------|
 | encoder.onnx   | The encoder module. Maps waveforms to latent features.                        |
 | segmenter.onnx | The segmenter module. Predicts note boundaries. Supports D3PM sampling loops. |
 | estimator.onnx | The estimator module. Estimate note pitches from given boundaries.            |
@@ -35,7 +35,7 @@ A `config.json` carries the information needed for ONNX model inference. Structu
 ## Dimensions
 
 | name | type    | description                       |
-|------|---------|-----------------------------------|
+|:-----|:--------|:----------------------------------|
 | B    | dynamic | Batch size.                       |
 | L    | dynamic | Number of waveform samples.       |
 | T    | dynamic | Number of feature frames.         |
@@ -45,7 +45,7 @@ A `config.json` carries the information needed for ONNX model inference. Structu
 ## Variables
 
 | name             | type    | dtype   | shape     | description                                                                                                                                                                                            |
-|------------------|---------|---------|-----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|:-----------------|:--------|:--------|:----------|:-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | waveform         | in      | float32 | [B, T]    | Audio waveform.                                                                                                                                                                                        |
 | duration         | in      | float32 | [B]       | Waveform duration, in seconds.                                                                                                                                                                         |
 | x_seg            | mid     | float32 | [B, T, C] | Latent feature for segmentation.                                                                                                                                                                       |
