@@ -427,13 +427,17 @@ class SplitJoinAtention(nn.Module):
             self.x_q_norm = RMSnorm(head_dim)
             self.x_k_norm = RMSnorm(head_dim)
 
-        self.pool_out = nn.Linear(attn_dim, dim, bias=True)
-        self.x_out = nn.Linear(attn_dim, dim, bias=True)
+        # self.pool_out = nn.Linear(attn_dim, dim, bias=True)
+        # self.x_out = nn.Linear(attn_dim, dim, bias=True)
 
         self.pool_norm = RMSnorm(dim)
         self.x_norm = RMSnorm(dim)
+        
+        # Learnable merge for same-stream + cross-stream outputs
+        self.pool_merge = nn.Linear(attn_dim * 2, dim, bias=True)
+        self.x_merge = nn.Linear(attn_dim * 2, dim, bias=True)
 
-        # RoPE for all attention paths (same-stream and cross-stream)
+        # RoPE for same-stream attention only
         if use_rope:
             if rope_mode == 'mixed':
                 self.rope = RegionRoPE(head_dim, mode='global', theta=theta)
@@ -509,26 +513,29 @@ class SplitJoinAtention(nn.Module):
             pool_q_r, pool_k_r = pool_q, pool_k
             x_q_r, x_k_r = x_q, x_k
 
-        # --- 1. pool -> pool (same-stream) ---
-
+        # --- 1. pool -> pool (same-stream with RoPE) ---
         pp_out = F.scaled_dot_product_attention(pool_q_r, pool_k_r, pool_v, attn_mask=pp_mask, dropout_p=dp)
 
-        # --- 2. x -> x (same-stream) ---
-
+        # --- 2. x -> x (same-stream with RoPE) ---
         xx_out = F.scaled_dot_product_attention(x_q_r, x_k_r, x_v, attn_mask=xx_mask, dropout_p=dp)
 
-        # --- 3. pool -> x (cross-stream with RoPE) ---
-        px_out = F.scaled_dot_product_attention(pool_q_r, x_k_r, x_v, attn_mask=px_mask, dropout_p=dp)
+        # --- 3. pool -> x (cross-stream, NO RoPE, use mask only) ---
+        px_out = F.scaled_dot_product_attention(pool_q, x_k, x_v, attn_mask=px_mask, dropout_p=dp)
 
-        # --- 4. x -> pool (cross-stream with RoPE) ---
-        xp_out = F.scaled_dot_product_attention(x_q_r, pool_k_r, pool_v, attn_mask=xp_mask, dropout_p=dp)
+        # --- 4. x -> pool (cross-stream, NO RoPE, use mask only) ---
+        xp_out = F.scaled_dot_product_attention(x_q, pool_k, pool_v, attn_mask=xp_mask, dropout_p=dp)
 
-        # Combine: sum same-stream + cross-stream
-        pool_attn = rearrange(pp_out + px_out, 'b h t d -> b t (h d)')
-        x_attn = rearrange(xx_out + xp_out, 'b h t d -> b t (h d)')
+        # Combine: learnable merge of same-stream + cross-stream
+        pp_flat = rearrange(pp_out, 'b h t d -> b t (h d)')
+        px_flat = rearrange(px_out, 'b h t d -> b t (h d)')
+        xx_flat = rearrange(xx_out, 'b h t d -> b t (h d)')
+        xp_flat = rearrange(xp_out, 'b h t d -> b t (h d)')
+        
+        pool_attn = self.pool_merge(torch.cat([pp_flat, px_flat], dim=-1))
+        x_attn = self.x_merge(torch.cat([xx_flat, xp_flat], dim=-1))
 
-        pool_attn = self.pool_out(pool_attn)
-        x_attn = self.x_out(x_attn)
+        # pool_attn = self.pool_out(pool_attn)
+        # x_attn = self.x_out(x_attn)
         pool = self.out_drop_pool(pool_attn)
         x = self.out_drop_x(x_attn)
 
