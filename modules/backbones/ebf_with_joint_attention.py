@@ -362,11 +362,19 @@ def build_split_attention_masks(regions, region_token_num, t_mask, n_mask, regio
 
     def _build_cross_bias(q_region, k_region, q_valid, k_valid):
         pad_mask = q_valid.unsqueeze(-1) & k_valid.unsqueeze(-2)
-        pad_bias = torch.where(pad_mask, 0.0, -10000.0).unsqueeze(1)
+        
         if region_bias is not None:
+            # Soft mask: region bias decay (different regions get negative bias)
+            pad_bias = torch.where(pad_mask, 0.0, -10000.0).unsqueeze(1)
             decay = region_bias(q_region, k_region)
             return pad_bias + decay
-        return pad_bias
+        else:
+            # Hard mask: only same region can attend (cross-stream局部attention)
+            same_region = q_region.unsqueeze(-1) == k_region.unsqueeze(-2)
+            # 排除 padding region (region=0)
+            non_pad = (q_region != 0).unsqueeze(-1) & (k_region != 0).unsqueeze(-2)
+            valid_mask = pad_mask & same_region & non_pad
+            return torch.where(valid_mask, 0.0, -10000.0).unsqueeze(1)
 
     # Same-stream masks (None if no padding for flash path)
     pp_mask = None if pool_valid.all() else _build_pad_bias(pool_valid)
