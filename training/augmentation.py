@@ -26,12 +26,18 @@ __all__ = [
 
 
 @dataclass
+class _NaturalNoiseArgs:
+    path: str
+    zoom: float
+    offset: float
+    scale: float
+
+
+@dataclass
 class AugmentationArgs:
     colored_noise_exponent: float = None
     colored_noise_factor: float = None
-    natural_noise_path: str = None
-    natural_noise_zoom: float = None
-    natural_noise_offset: float = None
+    natural_noise_args: list[_NaturalNoiseArgs] = None
     natural_noise_db: float = None
     rir_kernel_path: str = None
     pitch_shift: float = None
@@ -59,7 +65,9 @@ def generate_augmentation_args(
 ) -> AugmentationArgs:
     if generator is None:
         generator = np.random.default_rng()
+
     args = AugmentationArgs()
+
     if (
             config.colored_noise.enabled
             and generator.random() < config.colored_noise.prob
@@ -69,19 +77,34 @@ def generate_augmentation_args(
             config.colored_noise.max_exponent,
         )
         args.colored_noise_factor = generator.uniform(-6, -1)
+
     if (
-            config.natural_noise.enabled
-            and generator.random() < config.natural_noise.prob
+        config.natural_noise.enabled
+        and generator.random() < config.natural_noise.prob
     ):
-        args.natural_noise_path = generator.choice(config.natural_noise.noise_file_list)
-        args.natural_noise_zoom = 2 ** generator.uniform(-1, 1)
-        args.natural_noise_offset = generator.uniform(0, 1)
+        natural_noise_args_list = []
+        repeats = generator.integers(1, config.natural_noise.max_repeats + 1)
+        for _ in range(repeats):
+            noise_path = generator.choice(config.natural_noise.noise_file_list)
+            noise_zoom = 2 ** generator.uniform(-1, 1)
+            noise_offset = generator.uniform(0, 1)
+            noise_scale = (10 ** (generator.uniform(-12, 12) / 20))
+            noise_args = _NaturalNoiseArgs(
+                path=noise_path,
+                zoom=noise_zoom,
+                offset=noise_offset,
+                scale=noise_scale,
+            )
+            natural_noise_args_list.append(noise_args)
+        args.natural_noise_args = natural_noise_args_list
         args.natural_noise_db = generator.uniform(-24, -6)
+
     if (
         config.rir_reverb.enabled
         and generator.random() < config.rir_reverb.prob
     ):
         args.rir_kernel_path = generator.choice(config.rir_reverb.kernel_file_list)
+
     if (
             not skip_transforms
             and config.pitch_shifting.enabled
@@ -91,6 +114,7 @@ def generate_augmentation_args(
             config.pitch_shifting.min_semitones,
             config.pitch_shifting.max_semitones,
         )
+
     if (
             not skip_transforms
             and config.loudness_scaling.enabled
@@ -100,6 +124,7 @@ def generate_augmentation_args(
             config.loudness_scaling.min_db,
             config.loudness_scaling.max_db,
         )
+
     if config.spectrogram_masking.enabled:
         time_masked = generator.random() < config.spectrogram_masking.time_mask_prob
         freq_masked = generator.random() < config.spectrogram_masking.freq_mask_prob
@@ -146,29 +171,28 @@ def colored_noise(
 def natural_noise(
         waveform: np.ndarray,
         sr: int,
-        noise_path: str,
-        zoom: float,
-        offset: float,
+        args_list: list[_NaturalNoiseArgs],
         db: float,
 ):
-    """
-    wav -> wav
-    """
-    reinterpreted_sr = round(sr * zoom)
-    noise, _ = librosa.load(noise_path, sr=reinterpreted_sr, mono=True)
-    min_offset = -len(noise)
-    max_offset = len(waveform)
-    offset = int(offset * (max_offset - min_offset) + min_offset)
-    if offset < 0:
-        noise = noise[-offset:]
-    elif offset > 0:
-        noise = np.pad(noise, (offset, 0), mode="constant")
-    if len(noise) < len(waveform):
-        noise = np.pad(noise, (0, len(waveform) - len(noise)), mode="constant")
-    elif len(noise) > len(waveform):
-        noise = noise[:len(waveform)]
-    scale = np.abs(waveform).max() / (np.abs(noise).max() + 1e-8)
-    waveform_noisy = waveform + noise * scale * (10 ** (db / 20))
+    total_noise = np.zeros_like(waveform)
+    for args in args_list:
+        reinterpreted_sr = round(sr * args.zoom)
+        noise, _ = librosa.load(args.path, sr=reinterpreted_sr, mono=True)
+        min_offset = -len(noise)
+        max_offset = len(waveform)
+        offset = int(args.offset * (max_offset - min_offset) + min_offset)
+        if offset < 0:
+            noise = noise[-offset:]
+        elif offset > 0:
+            noise = np.pad(noise, (offset, 0), mode="constant")
+        if len(noise) < len(waveform):
+            noise = np.pad(noise, (0, len(waveform) - len(noise)), mode="constant")
+        elif len(noise) > len(waveform):
+            noise = noise[:len(waveform)]
+        noise = noise * args.scale
+        total_noise += noise
+    scale = np.abs(waveform).max() / (np.abs(total_noise).max() + 1e-8)
+    waveform_noisy = waveform + total_noise * scale * (10 ** (db / 20))
     return waveform_noisy.astype(np.float32)
 
 

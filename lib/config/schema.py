@@ -153,6 +153,7 @@ class ColoredNoiseAugmentationConfig(ConfigBaseModel):
 class NaturalNoiseAugmentationConfig(ConfigBaseModel):
     enabled: bool = Field(False)
     prob: float = Field(0.25, gt=0.0, le=1.0)
+    max_repeats: int = Field(1, ge=1)
     noise_path_glob: str = Field("data/noise/**/*.wav")
 
     @property

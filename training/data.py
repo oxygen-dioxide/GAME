@@ -154,15 +154,13 @@ class BaseDataset(torch.utils.data.Dataset):
                 seed=index if self.augmentation_deterministic else None,
             )
         # Natural noise (wav -> wav)
-        if args.natural_noise_path is not None:
+        if args.natural_noise_args is not None:
             if waveform is None:
                 waveform = self._get_waveform(index)
             waveform = natural_noise(
                 waveform,
                 sr=self.augmentation_config.features.audio_sample_rate,
-                noise_path=args.natural_noise_path,
-                zoom=args.natural_noise_zoom,
-                offset=args.natural_noise_offset,
+                args_list=args.natural_noise_args,
                 db=args.natural_noise_db,
             )
         # Pitch shifting (wav -> mel)

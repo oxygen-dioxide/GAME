@@ -97,6 +97,7 @@ training:
     natural_noise:
       enabled: false
       prob: 0.25
+      max_repeats: 3
       noise_path_glob: "data/noise/**/*.wav"
     rir_reverb:
       enabled: false
