@@ -315,7 +315,7 @@ class BaseLightningModule(lightning.pytorch.LightningModule, abc.ABC):
             "batch_size": sample["size"],
         }
         # logs to progress bar
-        self.log("loss", total_loss, prog_bar=True, logger=False, on_step=True, on_epoch=False)
+        self.log("total_loss", total_loss, prog_bar=True, logger=False, on_step=True, on_epoch=False)
         self.log("batch_size", sample["size"], prog_bar=True, logger=False, on_step=True, on_epoch=False)
         self.log("lr", self.lr_schedulers().get_last_lr()[0], prog_bar=True, logger=False, on_step=True, on_epoch=False)
         # logs to tensorboard
