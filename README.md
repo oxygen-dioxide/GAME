@@ -141,7 +141,7 @@ training:
       kernel_path_glob: "data/reverb/**/*.wav"  # <-- reverb datasets
 ```
 
-Before proceeding, it is recommended to read the other part of the configuration files and edit according to your needs and hardware.
+The default configuration trains a model with ~50M parameters and consumes ~20GB GPU memory. Before proceeding, it is recommended to read the other part of the configuration files and edit according to your needs and hardware.
 
 ### Preprocessing
 

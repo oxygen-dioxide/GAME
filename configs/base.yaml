@@ -14,12 +14,12 @@ binarizer:
 
 training:
   dataloader:
-    max_batch_frames: 20000
-    max_batch_size: 16
-    max_val_batch_frames: 20000
+    max_batch_frames: 24000
+    max_batch_size: 24
+    max_val_batch_frames: 16000
     max_val_batch_size: 16
     frame_count_grid: 6
-    num_workers: 4
+    num_workers: 16
     prefetch_factor: 2
   optimizer:
     cls: torch.optim.AdamW
@@ -30,13 +30,13 @@ training:
   lr_scheduler:
     cls: torch.optim.lr_scheduler.StepLR
     kwargs:
-      step_size: 5000
+      step_size: 10000
       gamma: 0.8
     unit: "step"
   trainer:
     unit: "step"
     min_steps: 0
-    max_steps: 40000
+    max_steps: 80000
     min_epochs: 0
     max_epochs: 1000
     val_every_n_units: 2000
