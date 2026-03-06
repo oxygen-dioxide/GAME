@@ -80,7 +80,7 @@ def load_inference_model(path: pathlib.Path) -> tuple[SegmentationEstimationInfe
         path.parent / "config.yaml"
     )
     model = SegmentationEstimationInferenceModel(model_config=model_config, inference_config=inference_config)
-    state_dict = load_state_dict_for_inference(path)
+    state_dict = load_state_dict_for_inference(path, ema=True)
     model.load_state_dict(state_dict, strict=True)
     model.eval()
     if model_config.use_languages:
