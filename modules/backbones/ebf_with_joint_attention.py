@@ -678,12 +678,13 @@ class JEBF(nn.Module):
             attn_out_drop_x: float = 0.0,
             attn_out_drop_pool: float = 0.0,
 
-            use_ls=True, ffn_type='glu', ffn_latent_drop=0.1, ffn_out_drop=0.1, skip_fist_ffn=False,
+            use_ls=True, ffn_type='glu', ffn_latent_drop=0.1, ffn_out_drop=0.1, skip_fist_ffn=False,skip_out_ffn=False,
             attn_type: str = 'joint',
 
     ):
         super().__init__()
         self.skip_fist_ffn = skip_fist_ffn
+        self.skip_out_ffn=skip_out_ffn
         if ffn_type == 'glu':
             if not skip_fist_ffn:
                 self.ffn1_x = GLUFFN(
@@ -694,14 +695,15 @@ class JEBF(nn.Module):
                     dim, latent_dim=dim * 4, dropout_latent=ffn_latent_drop,
                     dropout_output=ffn_out_drop
                 )
-            self.ffn2_x = GLUFFN(
-                dim, latent_dim=dim * 4, dropout_latent=ffn_latent_drop,
-                dropout_output=ffn_out_drop
-            )
-            self.ffn2_pool = GLUFFN(
-                dim, latent_dim=dim * 4, dropout_latent=ffn_latent_drop,
-                dropout_output=ffn_out_drop
-            )
+            if not skip_out_ffn:
+                self.ffn2_x = GLUFFN(
+                    dim, latent_dim=dim * 4, dropout_latent=ffn_latent_drop,
+                    dropout_output=ffn_out_drop
+                )
+                self.ffn2_pool = GLUFFN(
+                    dim, latent_dim=dim * 4, dropout_latent=ffn_latent_drop,
+                    dropout_output=ffn_out_drop
+                )
         elif ffn_type == 'ffn':
             if not skip_fist_ffn:
                 self.ffn1_x = FFN(
@@ -714,16 +716,17 @@ class JEBF(nn.Module):
                     dropout_latent=ffn_latent_drop,
                     dropout_output=ffn_out_drop
                 )
-            self.ffn2_x = FFN(
-                dim, latent_dim=dim * 4,
-                dropout_latent=ffn_latent_drop,
-                dropout_output=ffn_out_drop
-            )
-            self.ffn2_pool = FFN(
-                dim, latent_dim=dim * 4,
-                dropout_latent=ffn_latent_drop,
-                dropout_output=ffn_out_drop
-            )
+            if not skip_out_ffn:
+                self.ffn2_x = FFN(
+                    dim, latent_dim=dim * 4,
+                    dropout_latent=ffn_latent_drop,
+                    dropout_output=ffn_out_drop
+                )
+                self.ffn2_pool = FFN(
+                    dim, latent_dim=dim * 4,
+                    dropout_latent=ffn_latent_drop,
+                    dropout_output=ffn_out_drop
+                )
         elif ffn_type == 'cgmlp':
             if not skip_fist_ffn:
                 self.ffn1_x = CgMLP(
@@ -734,20 +737,23 @@ class JEBF(nn.Module):
                     dim, latent_dim=int(dim * 2.5), latent_drop=ffn_latent_drop,
                     out_drop=ffn_out_drop, kernel_size=21
                 )
-            self.ffn2_x = CgMLP(
-                dim, latent_dim=int(dim * 2.5), latent_drop=ffn_latent_drop,
-                out_drop=ffn_out_drop, kernel_size=7
-            )
-            self.ffn2_pool = CgMLP(
-                dim, latent_dim=int(dim * 2.5), latent_drop=ffn_latent_drop,
-                out_drop=ffn_out_drop, kernel_size=7
-            )
+            if not skip_out_ffn:
+                self.ffn2_x = CgMLP(
+                    dim, latent_dim=int(dim * 2.5), latent_drop=ffn_latent_drop,
+                    out_drop=ffn_out_drop, kernel_size=7
+                )
+                self.ffn2_pool = CgMLP(
+                    dim, latent_dim=int(dim * 2.5), latent_drop=ffn_latent_drop,
+                    out_drop=ffn_out_drop, kernel_size=7
+                )
         elif ffn_type == 'eglu':
             if not skip_fist_ffn:
                 self.ffn1_x = HalfCacheGLUFFN(d_model=dim, d_ff=dim * 4, gate_type='silu', quant_bits=0, bias=True)
                 self.ffn1_pool = HalfCacheGLUFFN(d_model=dim, d_ff=dim * 4, gate_type='silu', quant_bits=0, bias=True)
-            self.ffn2_x = HalfCacheGLUFFN(d_model=dim, d_ff=dim * 4, gate_type='silu', quant_bits=0, bias=True)
-            self.ffn2_pool = HalfCacheGLUFFN(d_model=dim, d_ff=dim * 4, gate_type='silu', quant_bits=0, bias=True)
+
+            if not skip_out_ffn:
+                self.ffn2_x = HalfCacheGLUFFN(d_model=dim, d_ff=dim * 4, gate_type='silu', quant_bits=0, bias=True)
+                self.ffn2_pool = HalfCacheGLUFFN(d_model=dim, d_ff=dim * 4, gate_type='silu', quant_bits=0, bias=True)
 
         else:
             raise ValueError(f"Unknown ffn_type: {ffn_type}")
@@ -763,12 +769,14 @@ class JEBF(nn.Module):
         if not skip_fist_ffn:
             self.norm_ffn1_x = RMSnorm(dim)
             self.norm_ffn1_pool = RMSnorm(dim)
-        self.norm_ffn2_x = RMSnorm(dim)
-        self.norm_ffn2_pool = RMSnorm(dim)
+        if not skip_out_ffn:
+            self.norm_ffn2_x = RMSnorm(dim)
+            self.norm_ffn2_pool = RMSnorm(dim)
 
         if use_ls:
-            self.lay_scale_ffn2_x = LayScale(dim)
-            self.lay_scale_ffn2_pool = LayScale(dim)
+            if not skip_out_ffn:
+                self.lay_scale_ffn2_x = LayScale(dim)
+                self.lay_scale_ffn2_pool = LayScale(dim)
             if not skip_fist_ffn:
                 self.lay_scale_ffn1_x = LayScale(dim)
                 self.lay_scale_ffn1_pool = LayScale(dim)
@@ -777,8 +785,9 @@ class JEBF(nn.Module):
             self.lay_scale_jpac_pool = LayScale(dim)
 
         else:
-            self.lay_scale_ffn2_x = nn.Identity()
-            self.lay_scale_ffn2_pool = nn.Identity()
+            if not skip_out_ffn:
+                self.lay_scale_ffn2_x = nn.Identity()
+                self.lay_scale_ffn2_pool = nn.Identity()
             if not skip_fist_ffn:
                 self.lay_scale_ffn1_x = nn.Identity()
                 self.lay_scale_ffn1_pool = nn.Identity()
@@ -814,9 +823,9 @@ class JEBF(nn.Module):
             x = x.masked_fill(~t_mask.unsqueeze(-1), 0)
         if n_mask is not None:
             pool = pool.masked_fill(~pool_mask.unsqueeze(-1), 0)
-
-        x = self.lay_scale_ffn2_x(self.ffn2_x(self.norm_ffn2_x(x))) + x
-        pool = self.lay_scale_ffn2_pool(self.ffn2_pool(self.norm_ffn2_pool(pool))) + pool
+        if not self.skip_out_ffn:
+            x = self.lay_scale_ffn2_x(self.ffn2_x(self.norm_ffn2_x(x))) + x
+            pool = self.lay_scale_ffn2_pool(self.ffn2_pool(self.norm_ffn2_pool(pool))) + pool
 
         return x, pool
 
@@ -1041,6 +1050,7 @@ class JEBFBackbone(nn.Module):  # todo 其他的到时候再说
 
             use_out_norm: bool = True,
             skip_fist_ffn=False,
+            skip_out_ffn=False,
             pool_out_dim: int = None,
             attn_type: str = 'joint',  # split
             use_region_bias: bool = False,
@@ -1091,7 +1101,7 @@ class JEBFBackbone(nn.Module):  # todo 其他的到时候再说
                 use_ls=use_ls, ffn_type=ffn_type,
                 ffn_latent_drop=ffn_latent_drop, ffn_out_drop=ffn_out_drop,
                 skip_fist_ffn=skip_fist_ffn,
-                attn_type=attn_type,
+                attn_type=attn_type,skip_out_ffn=skip_out_ffn
             )
             for _ in range(num_layers)
         ])

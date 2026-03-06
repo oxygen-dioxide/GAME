@@ -229,42 +229,53 @@ class EBF(nn.Module):
             self, dim, num_heads, head_dim,
             c_kernel_size=31, m_kernel_size=31, use_rope=True, rope_cache=True,
             dropout_attn: float = 0.0, out_drop: float = 0.0, c_out_drop=0.1,
-            c_latent_drop=0.0, use_ls=True, ffn_type='glu', ffn_latent_drop=0.1, ffn_out_drop=0.1
+            c_latent_drop=0.0, use_ls=True, ffn_type='glu', ffn_latent_drop=0.1, ffn_out_drop=0.1,skip_fist_ffn=False,
+            skip_out_ffn=False,
     ):
         super().__init__()
+        self.skip_fist_ffn = skip_fist_ffn
+        self.skip_out_ffn=skip_out_ffn
 
         if ffn_type == 'glu':
-            self.ffn1 = GLUFFN(
-                dim, latent_dim=dim * 4, dropout_latent=ffn_latent_drop,
-                dropout_output=ffn_out_drop
-            )
-            self.ffn2 = GLUFFN(
-                dim, latent_dim=dim * 4, dropout_latent=ffn_latent_drop,
-                dropout_output=ffn_out_drop
-            )
+            if not skip_fist_ffn:
+                self.ffn1 = GLUFFN(
+                    dim, latent_dim=dim * 4, dropout_latent=ffn_latent_drop,
+                    dropout_output=ffn_out_drop
+                )
+            if not skip_out_ffn:
+                self.ffn2 = GLUFFN(
+                    dim, latent_dim=dim * 4, dropout_latent=ffn_latent_drop,
+                    dropout_output=ffn_out_drop
+                )
         elif ffn_type == 'ffn':
-            self.ffn1 = FFN(
-                dim, latent_dim=dim * 4,
-                dropout_latent=ffn_latent_drop,
-                dropout_output=ffn_out_drop
-            )
-            self.ffn2 = FFN(
-                dim, latent_dim=dim * 4,
-                dropout_latent=ffn_latent_drop,
-                dropout_output=ffn_out_drop
-            )
+            if not skip_fist_ffn:
+                self.ffn1 = FFN(
+                    dim, latent_dim=dim * 4,
+                    dropout_latent=ffn_latent_drop,
+                    dropout_output=ffn_out_drop
+                )
+            if not skip_out_ffn:
+                self.ffn2 = FFN(
+                    dim, latent_dim=dim * 4,
+                    dropout_latent=ffn_latent_drop,
+                    dropout_output=ffn_out_drop
+                )
         elif ffn_type == 'cgmlp':
-            self.ffn1 = CgMLP(
-                dim, latent_dim=int(dim * 2.5), latent_drop=ffn_latent_drop,
-                out_drop=ffn_out_drop, kernel_size=21
-            )
-            self.ffn2 = CgMLP(
-                dim, latent_dim=int(dim * 2.5), latent_drop=ffn_latent_drop,
-                out_drop=ffn_out_drop, kernel_size=7
-            )
+            if not skip_fist_ffn:
+                self.ffn1 = CgMLP(
+                    dim, latent_dim=int(dim * 2.5), latent_drop=ffn_latent_drop,
+                    out_drop=ffn_out_drop, kernel_size=21
+                )
+            if not skip_out_ffn:
+                self.ffn2 = CgMLP(
+                    dim, latent_dim=int(dim * 2.5), latent_drop=ffn_latent_drop,
+                    out_drop=ffn_out_drop, kernel_size=7
+                )
         elif ffn_type == 'eglu':
-            self.ffn1 =HalfCacheGLUFFN(d_model=dim, d_ff=dim * 4, gate_type='silu', quant_bits=0,bias=True)
-            self.ffn2 =HalfCacheGLUFFN(d_model=dim, d_ff=dim * 4, gate_type='silu', quant_bits=0,bias=True)
+            if not skip_fist_ffn:
+                self.ffn1 =HalfCacheGLUFFN(d_model=dim, d_ff=dim * 4, gate_type='silu', quant_bits=0,bias=True)
+            if not skip_out_ffn:
+                self.ffn2 =HalfCacheGLUFFN(d_model=dim, d_ff=dim * 4, gate_type='silu', quant_bits=0,bias=True)
 
         else:
             raise ValueError(f"Unknown ffn_type: {ffn_type}")
@@ -273,31 +284,38 @@ class EBF(nn.Module):
             dim, num_heads, head_dim, c_kernel_size, m_kernel_size, use_rope, rope_cache, dropout_attn,
             out_drop, c_out_drop, c_latent_drop
         )
-
-        self.norm1 = RMSnorm(dim)
-        self.norm2 = RMSnorm(dim)
+        if not skip_fist_ffn:
+            self.norm1 = RMSnorm(dim)
+        if not skip_out_ffn:
+            self.norm2 = RMSnorm(dim)
 
         if use_ls:
-            self.lay_scale1 = LayScale(dim)
+            if not skip_fist_ffn:
+                self.lay_scale1 = LayScale(dim)
             self.lay_scale2 = LayScale(dim)
-            self.lay_scale3 = LayScale(dim)
+            if not skip_out_ffn:
+                self.lay_scale3 = LayScale(dim)
         else:
-            self.lay_scale1 = nn.Identity()
+            if not skip_fist_ffn:
+                self.lay_scale1 = nn.Identity()
             self.lay_scale2 = nn.Identity()
-            self.lay_scale3 = nn.Identity()
+            if not skip_out_ffn:
+                self.lay_scale3 = nn.Identity()
 
     def forward(self, x, mask=None):
-        if mask is not None:
-            x = x.masked_fill(~mask.unsqueeze(-1), 0)
-        x = self.lay_scale1(self.ffn1(self.norm1(x))) * 0.5 + x
+        if not self.skip_fist_ffn:
+            if mask is not None:
+                x = x.masked_fill(~mask.unsqueeze(-1), 0)
+            x = self.lay_scale1(self.ffn1(self.norm1(x))) * 0.5 + x
         if mask is not None:
             x = x.masked_fill(~mask.unsqueeze(-1), 0)
         x = self.lay_scale2(self.attn(x)) + x
         if mask is not None:
             x = x.masked_fill(~mask.unsqueeze(-1), 0)
-        x = self.lay_scale3(self.ffn2(self.norm2(x))) * 0.5 + x
-        if mask is not None:
-            x = x.masked_fill(~mask.unsqueeze(-1), 0)
+        if not self.skip_out_ffn:
+            x = self.lay_scale3(self.ffn2(self.norm2(x))) * 0.5 + x
+            if mask is not None:
+                x = x.masked_fill(~mask.unsqueeze(-1), 0)
         return x
 
 
@@ -323,6 +341,8 @@ class EBFBackbone(nn.Module):
             ffn_latent_drop: float = 0.1,
             ffn_out_drop: float = 0.1,
             use_out_norm: bool = True,
+            skip_fist_ffn=False,
+            skip_out_ffn=False,
     ):
         super().__init__()
         if is_export_mode():
@@ -347,7 +367,8 @@ class EBFBackbone(nn.Module):
                 dropout_attn=dropout_attn, out_drop=out_drop,
                 c_out_drop=c_out_drop, c_latent_drop=c_latent_drop,
                 use_ls=use_ls, ffn_type=ffn_type,
-                ffn_latent_drop=ffn_latent_drop, ffn_out_drop=ffn_out_drop)
+                ffn_latent_drop=ffn_latent_drop, ffn_out_drop=ffn_out_drop,        skip_fist_ffn=skip_fist_ffn,
+            skip_out_ffn=skip_out_ffn,)
             for _ in range(num_layers)
         ])
 
@@ -408,6 +429,8 @@ class GeneratorEBFBackbone(nn.Module):
             ffn_latent_drop: float = 0.1,
             ffn_out_drop: float = 0.1,
             use_out_norm: bool = True,
+            skip_fist_ffn=False,
+            skip_out_ffn=False,
     ):
         super().__init__()
         if is_export_mode():
@@ -429,7 +452,8 @@ class GeneratorEBFBackbone(nn.Module):
                 dropout_attn=dropout_attn, out_drop=out_drop,
                 c_out_drop=c_out_drop, c_latent_drop=c_latent_drop,
                 use_ls=use_ls, ffn_type=ffn_type,
-                ffn_latent_drop=ffn_latent_drop, ffn_out_drop=ffn_out_drop)
+                ffn_latent_drop=ffn_latent_drop, ffn_out_drop=ffn_out_drop, skip_fist_ffn=skip_fist_ffn,
+            skip_out_ffn=skip_out_ffn,)
             for _ in range(num_layers)
         ])
 
