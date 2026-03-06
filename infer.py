@@ -313,6 +313,10 @@ def extract(
         samplerate=sr,
         slicer=Slicer(
             sr=sr,
+            threshold=-40.,
+            min_length=1000,
+            min_interval=200,
+            max_sil_kept=100,
         ),
         language=language_id,
     )
