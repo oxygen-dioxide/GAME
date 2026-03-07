@@ -1,9 +1,6 @@
 import json
 import pathlib
 
-import torch
-
-from deployment.context import export_mode
 from deployment.exporter import Exporter
 from inference.me_infer import SegmentationEstimationInferenceModel
 from lib import logging
@@ -13,16 +10,16 @@ def deploy_model(
         model: SegmentationEstimationInferenceModel,
         lang_map: dict[str, int] | None,
         save_dir: pathlib.Path,
+        dynamo: bool = False,
         opset_version: int = None,
 ):
-    with torch.no_grad():
-        with export_mode():
-            exporter = Exporter(
-                model=model,
-                save_dir=save_dir,
-                opset_version=opset_version,
-            )
-            exporter.export()
+    exporter = Exporter(
+        model=model,
+        save_dir=save_dir,
+        dynamo=dynamo,
+        opset_version=opset_version,
+    )
+    exporter.export()
     config = {
         "samplerate": model.inference_config.features.audio_sample_rate,
         "timestep": model.timestep,

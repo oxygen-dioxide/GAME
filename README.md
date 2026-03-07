@@ -219,7 +219,13 @@ Run the following command to export a model:
 python deploy.py -m [model-path] -o [save-dir]
 ```
 
-By default, ONNX models are exported using opset version 20 (maximum supported version of DirectML EP). If you are using EPs like CUDA or TensorRT, it is recommended to use opset version above 23 to utilize the native `Attention` operator for better performance, by setting `--opset-version` option.
+By default, ONNX models are exported using _trace_ exporter and opset version 17 for best compatibility. Sometimes you may need higher opset versions for more operators, i.e. native `Attention` operator starting from opset version 23. For opset version 18 or above, it is recommended to use TorchDynamo exporter. For example:
+
+```bash
+python deploy.py -m [model-path] -o [save-dir] --dynamo --opset-version 23
+```
+
+However, using TorchDynamo and higher opset versions can break compatibilities with some Execution Providers (like DirectML). Please use with caution and test them after exporting.
 
 ### Inference with ONNX models
 
