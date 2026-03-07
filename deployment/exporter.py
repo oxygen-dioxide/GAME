@@ -123,8 +123,8 @@ class Exporter:
         program = torch.onnx.export(
             encoder_wrapper,
             (
-                torch.randn(4, 44100),
-                torch.randn(4),
+                torch.randn(1, 441000), # 10 seconds fixed chunk
+                torch.tensor([10.0]),
             ),
             None,
             input_names=[
@@ -136,15 +136,6 @@ class Exporter:
                 "x_est",
                 "maskT",
             ],
-            dynamic_shapes=(
-                {
-                    0: "B",
-                    1: "L",
-                },
-                {
-                    0: "B",
-                },
-            ),
             opset_version=self.opset_version,
             dynamo=True,
             external_data=False,
@@ -159,33 +150,13 @@ class Exporter:
         logging.debug("Exporting segmenter start.")
         segmenter_wrapper = WrappedSegmenterModel(self.model)
         example_kwargs = {
-            "language": torch.zeros((4,), dtype=torch.int64),
-            "known_boundaries": torch.ones(4, 100, dtype=torch.bool),
-            "prev_boundaries": torch.ones(4, 100, dtype=torch.bool),
+            "language": torch.zeros((1,), dtype=torch.int64),
+            "known_boundaries": torch.ones(1, 1000, dtype=torch.bool),
+            "prev_boundaries": torch.ones(1, 1000, dtype=torch.bool),
             "t": torch.rand(()),
-            "maskT": torch.ones(4, 100, dtype=torch.bool),
+            "maskT": torch.ones(1, 1000, dtype=torch.bool),
             "threshold": torch.tensor(0.5, dtype=torch.float32),
             "radius": torch.tensor(2, dtype=torch.int64),
-        }
-        dynamic_kwarg_shapes = {
-            "language": {
-                0: "B",
-            },
-            "known_boundaries": {
-                0: "B",
-                1: "T",
-            },
-            "prev_boundaries": {
-                0: "B",
-                1: "T",
-            },
-            "t": {},
-            "maskT": {
-                0: "B",
-                1: "T",
-            },
-            "threshold": {},
-            "radius": {},
         }
         input_kwarg_names = []
         if self.model.model_config.use_languages:
@@ -203,7 +174,7 @@ class Exporter:
         ])
         program = torch.onnx.export(
             segmenter_wrapper,
-            torch.randn(4, 100, self.model.model_config.embedding_dim),
+            torch.randn(1, 1000, self.model.model_config.embedding_dim),
             None,
             kwargs={
                 k: example_kwargs[k]
@@ -216,16 +187,6 @@ class Exporter:
             output_names=[
                 "boundaries",
             ],
-            dynamic_shapes={
-                "x_seg": {
-                    0: "B",
-                    1: "T",
-                },
-                **{
-                    k: dynamic_kwarg_shapes[k]
-                    for k in input_kwarg_names
-                }
-            },
             opset_version=self.opset_version,
             dynamo=True,
             external_data=False,
@@ -242,10 +203,10 @@ class Exporter:
         program = torch.onnx.export(
             estimator_wrapper,
             (
-                torch.randn(4, 100, self.model.model_config.embedding_dim),
-                (torch.arange(0, 100, dtype=torch.int64) % 10 == 0).unsqueeze(0).expand(4, -1),
-                torch.ones(4, 100, dtype=torch.bool),
-                torch.ones(4, 10, dtype=torch.bool),
+                torch.randn(1, 1000, self.model.model_config.embedding_dim),
+                (torch.arange(0, 1000, dtype=torch.int64) % 5 == 0).unsqueeze(0).expand(1, -1),
+                torch.ones(1, 1000, dtype=torch.bool),
+                torch.ones(1, 200, dtype=torch.bool),
                 torch.tensor(0.5, dtype=torch.float32),
             ),
             None,
@@ -260,25 +221,6 @@ class Exporter:
                 "presence",
                 "scores",
             ],
-            dynamic_shapes=(
-                {
-                    0: "B",
-                    1: "T",
-                },
-                {
-                    0: "B",
-                    1: "T",
-                },
-                {
-                    0: "B",
-                    1: "T",
-                },
-                {
-                    0: "B",
-                    1: "N",
-                },
-                {},
-            ),
             opset_version=self.opset_version,
             dynamo=True,
             external_data=False,
@@ -295,8 +237,8 @@ class Exporter:
         program = torch.onnx.export(
             dur2bd,
             (
-                torch.rand(4, 10),
-                torch.ones(4, 100, dtype=torch.bool),
+                torch.rand(1, 200),
+                torch.ones(1, 1000, dtype=torch.bool),
             ),
             self.save_dir / "dur2bd.onnx",
             input_names=[
@@ -306,16 +248,6 @@ class Exporter:
             output_names=[
                 "boundaries",
             ],
-            dynamic_shapes=(
-                {
-                    0: "B",
-                    1: "N",
-                },
-                {
-                    0: "B",
-                    1: "T",
-                },
-            ),
             opset_version=self.opset_version,
             dynamo=True,
             external_data=False,
@@ -331,8 +263,8 @@ class Exporter:
         torch.onnx.export(
             bd2dur,
             (
-                (torch.arange(0, 100, dtype=torch.int64) % 10 == 0).unsqueeze(0).expand(4, -1),
-                torch.ones(4, 100, dtype=torch.bool),
+                (torch.arange(0, 1000, dtype=torch.int64) % 5 == 0).unsqueeze(0).expand(1, -1),
+                torch.ones(1, 1000, dtype=torch.bool),
             ),
             self.bd2dur_path,
             input_names=[
@@ -343,24 +275,6 @@ class Exporter:
                 "durations",
                 "maskN",
             ],
-            dynamic_axes={
-                "boundaries": {
-                    0: "B",
-                    1: "T",
-                },
-                "maskT": {
-                    0: "B",
-                    1: "T",
-                },
-                "durations": {
-                    0: "B",
-                    1: "N",
-                },
-                "maskN": {
-                    0: "B",
-                    1: "N",
-                },
-            },
             # We don't use Dynamo here because the function contains dynamic shapes depending on inputs.
             opset_version=min(20, self.opset_version),
             dynamo=False,
