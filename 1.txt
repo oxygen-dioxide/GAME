@@ -1,0 +1,9 @@
+- __`estimator_input_x_est.npy`__: 由 Opset 17 `encoder.onnx` 输出的声学特征张量，形状 `(1, 1000, 128)`。
+
+- __`estimator_input_boundaries.npy`__: 由 `segmenter.onnx` 预测出的切分边界布尔掩码，形状 `(1, 1000)`（其中包含 25 个 True 触发点）。
+
+- __`estimator_input_maskT.npy`__: 时间轴掩码，形状 `(1, 1000)`。
+
+- __`estimator_input_maskN.npy`__: 由 `bd2dur.onnx` 输出的有效区间掩码，形状 `(1, 26)`（表示这 26 个区间都是需要提取特征的实体）。
+
+- __`estimator_output_scores_has_nan.npy`__: 这是把上面四个文件作为输入，经过 Opset 17 的 `estimator.onnx` 后得到的“作案现场”输出。它的形状是 `(1, 200)`，并且正如我们刚才分析的，__里面真实区间的得分已经全部爆成 `NaN` 了__。
