@@ -1,0 +1,342 @@
+import gradio as gr
+import pathlib
+import os
+import glob
+import tempfile
+import zipfile
+import shutil
+
+from lib.config.schema import ValidationConfig
+from inference.api import load_inference_model, infer_model
+from inference.slicer2 import Slicer
+from inference.data import SlicedAudioFileIterableDataset, DiffSingerTranscriptionsDataset
+from inference.callbacks import (
+    SaveCombinedMidiFileCallback, 
+    SaveCombinedTextFileCallback,
+    UpdateDiffSingerTranscriptionsCallback
+)
+
+def _get_language_id(language: str, lang_map: dict[str, int]) -> int:
+    if language and lang_map:
+        if language not in lang_map:
+            raise ValueError(
+                f"分割模型不支持语言 '{language}'。 "
+                f"支持的语言: {', '.join(lang_map.keys())}"
+            )
+        language_id = lang_map[language]
+    else:
+        language_id = 0
+    return language_id
+
+def _t0_nstep_to_ts(t0: float, nsteps: int) -> list[float]:
+    step = (1 - t0) / nsteps
+    return [
+        t0 + i * step
+        for i in range(nsteps)
+    ]
+
+# 缓存加载的模型以避免重复加载
+loaded_model = None
+loaded_model_path = None
+loaded_lang_map = None
+
+def load_model_if_needed(model_path_str: str):
+    global loaded_model, loaded_model_path, loaded_lang_map
+    if model_path_str != loaded_model_path:
+        model_path = pathlib.Path(model_path_str)
+        if not model_path.exists():
+            raise FileNotFoundError(f"模型路径不存在: {model_path}")
+        loaded_model, loaded_lang_map = load_inference_model(model_path)
+        loaded_model_path = model_path_str
+    return loaded_model, loaded_lang_map
+
+def extract_midi(
+    audio_files,
+    model_path_str,
+    language,
+    seg_threshold,
+    seg_radius,
+    t0,
+    nsteps,
+    est_threshold,
+    output_mid,
+    output_txt,
+    output_csv,
+    tempo,
+    pitch_format,
+    round_pitch
+):
+    try:
+        if not audio_files:
+            return None, "请至少上传一个音频文件。"
+        
+        if not model_path_str:
+            return None, "请指定模型检查点路径。"
+
+        # Parse outputs
+        output_formats = set()
+        if output_mid: output_formats.add("mid")
+        if output_txt: output_formats.add("txt")
+        if output_csv: output_formats.add("csv")
+        
+        if not output_formats:
+            return None, "请至少选择一种输出格式。"
+
+        # Create temporary directory for output
+        output_dir = pathlib.Path(tempfile.mkdtemp(prefix="game_gradio_extract_"))
+        
+        # Prepare input files map
+        filemap = {}
+        for temp_file in audio_files:
+            original_path = pathlib.Path(temp_file.name)
+            filename = original_path.name
+            if hasattr(temp_file, 'orig_name') and temp_file.orig_name:
+                filename = temp_file.orig_name
+            filemap[filename] = original_path
+
+        # Load model
+        model, lang_map = load_model_if_needed(model_path_str)
+        language_id = _get_language_id(language, lang_map)
+
+        sr = model.inference_config.features.audio_sample_rate
+        dataset = SlicedAudioFileIterableDataset(
+            filemap=filemap,
+            samplerate=sr,
+            slicer=Slicer(
+                sr=sr,
+                threshold=-40.,
+                min_length=1000,
+                min_interval=200,
+                max_sil_kept=100,
+            ),
+            language=language_id,
+        )
+
+        callbacks = []
+        if "mid" in output_formats:
+            callbacks.append(SaveCombinedMidiFileCallback(
+                output_dir=output_dir,
+                tempo=tempo,
+            ))
+        if "txt" in output_formats:
+            callbacks.append(SaveCombinedTextFileCallback(
+                output_dir=output_dir,
+                file_format="txt",
+                pitch_format=pitch_format,
+                round_pitch=round_pitch,
+            ))
+        if "csv" in output_formats:
+            callbacks.append(SaveCombinedTextFileCallback(
+                output_dir=output_dir,
+                file_format="csv",
+                pitch_format=pitch_format,
+                round_pitch=round_pitch,
+            ))
+
+        ts = _t0_nstep_to_ts(t0, int(nsteps))
+        
+        # Run inference
+        infer_model(
+            model=model,
+            dataset=dataset,
+            config=ValidationConfig(
+                d3pm_sample_ts=ts,
+                boundary_decoding_threshold=seg_threshold,
+                boundary_decoding_radius=round(seg_radius / model.timestep),
+                note_presence_threshold=est_threshold,
+            ),
+            batch_size=4,
+            num_workers=0,
+            callbacks=callbacks,
+        )
+
+        # Collect output files
+        generated_files = list(output_dir.glob("*"))
+        if not generated_files:
+            return None, "推理完成，但未生成任何输出文件。"
+            
+        if len(generated_files) == 1:
+            return str(generated_files[0]), "提取成功！"
+        else:
+            zip_path = output_dir.parent / "extracted_midi.zip"
+            with zipfile.ZipFile(zip_path, 'w') as zipf:
+                for file in generated_files:
+                    zipf.write(file, file.name)
+            return str(zip_path), "提取成功！请下载 ZIP 压缩包。"
+
+    except Exception as e:
+        return None, f"发生错误: {str(e)}"
+
+def align_transcriptions(
+    csv_files,
+    model_path_str,
+    language,
+    seg_threshold,
+    seg_radius,
+    t0,
+    nsteps,
+    est_threshold,
+    no_wb
+):
+    try:
+        if not csv_files:
+            return None, "请上传至少一个 DiffSinger 转录 CSV 文件。"
+            
+        if not model_path_str:
+            return None, "请指定模型检查点路径。"
+
+        # Create temporary directory for output
+        output_dir = pathlib.Path(tempfile.mkdtemp(prefix="game_gradio_align_"))
+        
+        # Copy input files to temp dir to avoid modifying original uploads directly in gradio's temp
+        paths = []
+        for temp_file in csv_files:
+            original_path = pathlib.Path(temp_file.name)
+            filename = original_path.name
+            if hasattr(temp_file, 'orig_name') and temp_file.orig_name:
+                filename = temp_file.orig_name
+            
+            dest_path = output_dir / filename
+            shutil.copy2(original_path, dest_path)
+            paths.append(dest_path)
+
+        # Load model
+        model, lang_map = load_model_if_needed(model_path_str)
+        language_id = _get_language_id(language, lang_map)
+
+        sr = model.inference_config.features.audio_sample_rate
+        dataset = DiffSingerTranscriptionsDataset(
+            filelist=paths,
+            samplerate=sr,
+            language=language_id,
+            use_wb=not no_wb,
+        )
+        
+        callbacks = [
+            UpdateDiffSingerTranscriptionsCallback(
+                filelist=paths,
+                overwrite=True, # Overwrite the copied files in our temp dir
+                save_dir=None,
+                save_filename=None,
+            )
+        ]
+
+        ts = _t0_nstep_to_ts(t0, int(nsteps))
+        
+        # Run inference
+        infer_model(
+            model=model,
+            dataset=dataset,
+            config=ValidationConfig(
+                d3pm_sample_ts=ts,
+                boundary_decoding_threshold=seg_threshold,
+                boundary_decoding_radius=round(seg_radius / model.timestep),
+                note_presence_threshold=est_threshold,
+            ),
+            batch_size=4,
+            num_workers=0,
+            callbacks=callbacks,
+        )
+
+        # The files in output_dir are now updated
+        updated_files = list(output_dir.glob("*.csv"))
+        if not updated_files:
+            return None, "对齐处理完成，但未找到输出文件。"
+            
+        if len(updated_files) == 1:
+            return str(updated_files[0]), "对齐处理成功！"
+        else:
+            zip_path = output_dir.parent / "aligned_transcriptions.zip"
+            with zipfile.ZipFile(zip_path, 'w') as zipf:
+                for file in updated_files:
+                    zipf.write(file, file.name)
+            return str(zip_path), "对齐处理成功！请下载 ZIP 压缩包。"
+
+    except Exception as e:
+        return None, f"发生错误: {str(e)}"
+
+# Custom CSS
+css = """
+.container { max-width: 1200px; margin: auto; }
+"""
+
+with gr.Blocks(title="GAME: 生成式自适应 MIDI 提取器") as demo:
+    gr.Markdown("# 🎵 GAME: 生成式自适应 MIDI 提取器 (推理界面)")
+    gr.Markdown("将歌声转换为乐谱（MIDI）。基于 D3PM 模型。支持提取原始音频和对齐 DiffSinger 数据集。")
+    
+    with gr.Row():
+        model_path_input = gr.Textbox(label="模型权重路径 (Model Checkpoint)", placeholder="/path/to/model.ckpt", value="experiments/model.ckpt", scale=3)
+        language_input = gr.Textbox(label="语言代码 (选填, 例如: zh)", placeholder="zh", scale=1)
+        
+    with gr.Accordion("⚙️ 高级模型参数 (Advanced Parameters)", open=False):
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### 分割模型 (Segmentation Model)")
+                seg_threshold_slider = gr.Slider(minimum=0.01, maximum=0.99, value=0.2, step=0.01, label="边界解码阈值 (Boundary Decoding Threshold)")
+                seg_radius_slider = gr.Slider(minimum=0.01, maximum=0.1, value=0.02, step=0.005, label="边界解码半径/秒 (Boundary Decoding Radius)")
+                t0_slider = gr.Slider(minimum=0.0, maximum=0.99, value=0.0, step=0.01, label="D3PM 起始 T 值 (Starting t0)")
+                nsteps_slider = gr.Slider(minimum=1, maximum=20, value=8, step=1, label="D3PM 采样步数 (Sampling Steps)")
+            with gr.Column():
+                gr.Markdown("### 估计模型 (Estimation Model)")
+                est_threshold_slider = gr.Slider(minimum=0.01, maximum=0.99, value=0.2, step=0.01, label="音符存在阈值 (Note Presence Threshold)")
+
+    with gr.Tabs():
+        with gr.TabItem("🎙️ 提取原始音频 (Extract Audio)"):
+            with gr.Row():
+                with gr.Column(scale=1):
+                    audio_input = gr.File(label="上传音频文件 (wav, flac, mp3 等)", file_count="multiple", type="filepath")
+                    
+                    with gr.Accordion("输出设置 (Output Options)", open=True):
+                        with gr.Row():
+                            out_mid_cb = gr.Checkbox(label="MIDI (.mid)", value=True)
+                            out_txt_cb = gr.Checkbox(label="Text (.txt)", value=False)
+                            out_csv_cb = gr.Checkbox(label="CSV (.csv)", value=False)
+                        
+                        tempo_number = gr.Number(label="曲速 (Tempo BPM)", value=120)
+                        pitch_format_radio = gr.Radio(choices=["name", "number"], value="name", label="音高格式 (用于 Text/CSV)")
+                        round_pitch_cb = gr.Checkbox(label="音高取整 (Round Pitch)", value=False)
+                        
+                    extract_btn = gr.Button("🚀 提取 MIDI", variant="primary")
+                    
+                with gr.Column(scale=1):
+                    extract_output_file = gr.File(label="下载提取结果 (Download Result)")
+                    extract_msg = gr.Textbox(label="状态信息 (Status)", interactive=False)
+
+            extract_btn.click(
+                fn=extract_midi,
+                inputs=[
+                    audio_input, model_path_input, language_input,
+                    seg_threshold_slider, seg_radius_slider, t0_slider, nsteps_slider, est_threshold_slider,
+                    out_mid_cb, out_txt_cb, out_csv_cb, tempo_number, pitch_format_radio, round_pitch_cb
+                ],
+                outputs=[extract_output_file, extract_msg]
+            )
+
+        with gr.TabItem("📝 对齐数据集 (Align Datasets)"):
+            gr.Markdown("处理 DiffSinger 数据集格式。生成带有词边界的对齐音符标签。")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    csv_input = gr.File(label="上传 transcriptions.csv 文件", file_count="multiple", type="filepath")
+                    
+                    with gr.Accordion("对齐选项 (Alignment Options)", open=True):
+                        no_wb_cb = gr.Checkbox(label="禁用词边界 (Disable Word Boundaries / no-wb)", value=False, info="不推荐勾选。如果勾选，将不检查和使用 'ph_num' 字段。")
+                        
+                    align_btn = gr.Button("⚡ 开始对齐", variant="primary")
+                    
+                with gr.Column(scale=1):
+                    align_output_file = gr.File(label="下载更新后的 CSV")
+                    align_msg = gr.Textbox(label="状态信息 (Status)", interactive=False)
+
+            align_btn.click(
+                fn=align_transcriptions,
+                inputs=[
+                    csv_input, model_path_input, language_input,
+                    seg_threshold_slider, seg_radius_slider, t0_slider, nsteps_slider, est_threshold_slider,
+                    no_wb_cb
+                ],
+                outputs=[align_output_file, align_msg]
+            )
+
+if __name__ == "__main__":
+    print("正在启动 GAME Gradio 界面...")
+    demo.launch(server_name="0.0.0.0", server_port=7860, share=False, css=css)
