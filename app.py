@@ -5,17 +5,28 @@ import glob
 import tempfile
 import zipfile
 import shutil
+import sys
 
-from lib.config.schema import ValidationConfig
-from inference.api import load_inference_model, infer_model
+# Ensure current directory is in sys.path for portable environment
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Optional PyTorch imports
+try:
+    from lib.config.schema import ValidationConfig
+    from inference.api import load_inference_model, infer_model
+    from inference.data import SlicedAudioFileIterableDataset, DiffSingerTranscriptionsDataset
+    from inference.callbacks import (
+        SaveCombinedMidiFileCallback, 
+        SaveCombinedTextFileCallback,
+        UpdateDiffSingerTranscriptionsCallback
+    )
+    PYTORCH_AVAILABLE = True
+except ImportError:
+    PYTORCH_AVAILABLE = False
+    print("WARNING: PyTorch is not available. Only ONNX engine will work.")
+
 from inference.onnx_api import load_onnx_model, infer_from_files, align_with_transcriptions
 from inference.slicer2 import Slicer
-from inference.data import SlicedAudioFileIterableDataset, DiffSingerTranscriptionsDataset
-from inference.callbacks import (
-    SaveCombinedMidiFileCallback, 
-    SaveCombinedTextFileCallback,
-    UpdateDiffSingerTranscriptionsCallback
-)
 
 def _get_language_id(language: str, lang_map: dict[str, int]) -> int:
     if language and lang_map:
@@ -51,6 +62,8 @@ def load_model_if_needed(model_path_str: str, engine: str, onnx_device: str):
             raise FileNotFoundError(f"模型路径不存在: {model_path}")
             
         if engine == "PyTorch":
+            if not PYTORCH_AVAILABLE:
+                raise ValueError("未安装 PyTorch。请使用 ONNX 引擎。")
             loaded_model, loaded_lang_map = load_inference_model(model_path)
         elif engine == "ONNX":
             loaded_model = load_onnx_model(model_path, device=onnx_device)
@@ -118,6 +131,8 @@ def extract_midi(
         ts = _t0_nstep_to_ts(t0, int(nsteps))
 
         if engine == "PyTorch":
+            if not PYTORCH_AVAILABLE:
+                return None, "未安装 PyTorch，请在推理引擎中选择 ONNX。"
             sr = model.inference_config.features.audio_sample_rate
             dataset = SlicedAudioFileIterableDataset(
                 filemap=filemap,
@@ -258,6 +273,8 @@ def align_transcriptions(
         ts = _t0_nstep_to_ts(t0, int(nsteps))
         
         if engine == "PyTorch":
+            if not PYTORCH_AVAILABLE:
+                return None, "未安装 PyTorch，请在推理引擎中选择 ONNX。"
             sr = model.inference_config.features.audio_sample_rate
             dataset = DiffSingerTranscriptionsDataset(
                 filelist=paths,

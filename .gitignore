@@ -12,6 +12,6 @@ __pycache__
 .venv
 venv
 /artifacts/
-
+/python/
 .vscode
 .ipynb_checkpoints/
