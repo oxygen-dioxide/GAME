@@ -57,7 +57,7 @@ class ONNXInferenceModel:
         
         sess_options = ort.SessionOptions()
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        # 关闭 mem_pattern 和 cpu_mem_arena 来防止变长输入导致的显存/内存不断上升(泄漏)
+        # Disable mem_pattern and cpu_mem_arena to prevent VRAM/RAM leakage caused by variable-length inputs
         sess_options.enable_mem_pattern = False
         sess_options.enable_cpu_mem_arena = False
         
@@ -94,34 +94,34 @@ class ONNXInferenceModel:
         ts: list[float] = None,
     ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
         """
-        真正的batch并行推理。
+        True batch parallel inference.
         
-        关键发现：
-        - ONNX encoder会根据duration参数自动生成正确的maskT
-        - maskT会在所有后续模块中正确处理padding区域
-        - 只要提供正确的duration，waveform可以直接padding，不会影响结果
-        - 这使得真正的batch并行推理成为可能
+        Key findings:
+        - ONNX encoder automatically generates the correct maskT based on the duration parameter.
+        - maskT correctly handles the padding regions in all subsequent modules.
+        - As long as correct durations are provided, waveforms can be padded directly without affecting results.
+        - This enables true batch parallel inference.
         
-        工作流程：
-        1. Encoder接收padded waveforms和durations，生成maskT标识有效帧
-        2. 所有后续模块（segmenter, bd2dur, estimator）使用maskT处理padding
-        3. maskN标识每个样本的有效音符数量
-        4. 最终使用maskN过滤结果，只返回有效音符
+        Workflow:
+        1. Encoder receives padded waveforms and durations, generates maskT to identify valid frames.
+        2. All subsequent modules (segmenter, bd2dur, estimator) use maskT to handle padding.
+        3. maskN identifies the number of valid notes for each sample.
+        4. Finally, maskN is used to filter the results, returning only valid notes.
         """
         if ts is None:
             ts = []
         
         batch_size = waveforms.shape[0]
         
-        # 1. Encoder - 直接处理整个batch
-        # encoder会根据durations自动生成maskT来标识每个样本的有效帧
+        # 1. Encoder - Process entire batch directly
+        # The encoder automatically generates maskT based on durations to identify valid frames for each sample
         enc_out = self.encoder.run(None, {
             "waveform": waveforms,
             "duration": durations
         })
         x_seg, x_est, maskT = enc_out[0], enc_out[1], enc_out[2]
         
-        # 2. Known Boundaries - batch处理
+        # 2. Known Boundaries - Process batch
         if known_durations is not None and known_durations.size > 0:
             known_boundaries = np.zeros_like(maskT, dtype=bool)
             for i in range(batch_size):
@@ -137,7 +137,7 @@ class ONNXInferenceModel:
         else:
             known_boundaries = np.zeros_like(maskT, dtype=bool)
         
-        # 3. Segmenter Loop - batch处理
+        # 3. Segmenter Loop - Process batch
         boundaries = known_boundaries.copy()
         lang_arr = np.array([language] * batch_size, dtype=np.int64)
         
@@ -167,45 +167,29 @@ class ONNXInferenceModel:
                 "radius": np.array(boundary_radius, dtype=np.int64),
             })[0]
         
-        # 4. bd2dur - batch处理
+        # 4. bd2dur - Process batch
         durations_out, maskN = self.bd2dur.run(None, {
             "boundaries": boundaries,
             "maskT": maskT
         })
         
-        # 5. Estimator - 逐个处理避免padding影响
-        # 关键发现：estimator在batch中处理padding样本时会出错
-        # 即使提供了maskT，短样本的presence仍会被错误置为0
-        # 解决方案：对每个样本单独调用estimator
+        # 5. Estimator - Process batch
+        presence, scores = self.estimator.run(None, {
+            "x_est": x_est,
+            "boundaries": boundaries,
+            "maskT": maskT,
+            "maskN": maskN,
+            "threshold": np.array(score_threshold, dtype=np.float32)
+        })
+        
+        # 6. Extract valid results for each sample
         results = []
         for i in range(batch_size):
-            # 获取该样本的有效帧数
-            valid_frames = int(np.sum(maskT[i]))
-            
-            # 提取该样本的有效部分（无padding）
-            sample_x_est = x_est[i:i+1, :valid_frames, :]
-            sample_boundaries = boundaries[i:i+1, :valid_frames]
-            sample_maskT = maskT[i:i+1, :valid_frames]
-            
-            # 获取该样本的有效音符数
-            valid_notes = int(np.sum(maskN[i]))
-            sample_maskN = maskN[i:i+1, :valid_notes]
-            
-            # 单独调用estimator
-            presence_i, scores_i = self.estimator.run(None, {
-                "x_est": sample_x_est,
-                "boundaries": sample_boundaries,
-                "maskT": sample_maskT,
-                "maskN": sample_maskN,
-                "threshold": np.array(score_threshold, dtype=np.float32)
-            })
-            
-            # 提取有效结果
-            valid = sample_maskN[0].astype(bool)
+            valid = maskN[i].astype(bool)
             results.append((
-                durations_out[i][:valid_notes][valid],
-                presence_i[0][valid],
-                scores_i[0][valid]
+                durations_out[i][valid],
+                presence[i][valid],
+                scores[i][valid]
             ))
         
         return results
@@ -302,21 +286,45 @@ def enforce_max_chunk_size(chunks: list[dict], max_duration_s: float, samplerate
             new_chunks.append(chunk)
     return new_chunks
 
-def extract_batch_generator(chunks: list[dict], batch_size: int, samplerate: int):
+def extract_batch_generator(chunks: list[dict], batch_size: int, samplerate: int, max_batch_duration_s: float = 60.0):
     """Yields batches of padded audio chunks for extraction.
-    Chunks are sorted by length to minimize padding overhead and mitigate ONNX padding leakage.
+    Chunks are sorted by length to minimize padding overhead.
+    Also splits batches if the total duration or memory usage would be too high.
     """
     # Create a local copy to sort
     sorted_chunks = sorted(chunks, key=lambda x: len(x['waveform']), reverse=True)
     
-    for i in range(0, len(sorted_chunks), batch_size):
-        batch_chunks = sorted_chunks[i:i + batch_size]
+    current_batch = []
+    
+    for chunk in sorted_chunks:
+        current_batch.append(chunk)
         
-        wavs = [c['waveform'] for c in batch_chunks]
+        # Check if we need to yield
+        yield_batch = False
+        
+        # 1. Batch size limit
+        if len(current_batch) >= batch_size:
+            yield_batch = True
+        # 2. Memory limit heuristic: current_batch_size * max_duration <= max_batch_duration_s
+        elif len(current_batch) > 0:
+            max_samples = len(current_batch[0]['waveform']) # First one is longest due to sort
+            max_duration = max_samples / samplerate
+            if max_duration * len(current_batch) > max_batch_duration_s:
+                 yield_batch = True
+                 
+        if yield_batch:
+            wavs = [c['waveform'] for c in current_batch]
+            padded_wavs = pad_1d_arrays(wavs)
+            durations = np.array([len(w) / samplerate for w in wavs], dtype=np.float32)
+            yield padded_wavs.astype(np.float32), durations, current_batch
+            current_batch = []
+
+    # Yield remaining
+    if current_batch:
+        wavs = [c['waveform'] for c in current_batch]
         padded_wavs = pad_1d_arrays(wavs)
         durations = np.array([len(w) / samplerate for w in wavs], dtype=np.float32)
-            
-        yield padded_wavs.astype(np.float32), durations, batch_chunks
+        yield padded_wavs.astype(np.float32), durations, current_batch
 
 
 def infer_from_files(
@@ -392,22 +400,87 @@ def infer_from_files(
         if "csv" in output_formats:
             _save_text(all_notes, output_dir / f"{output_key}.csv", "csv", pitch_format, round_pitch)
 
-def align_batch_generator(items: list[dict], model_samplerate: int, batch_size: int):
-    """Yields batches for alignment task. Items are sorted to minimize padding."""
+def align_batch_generator(items: list[dict], model_samplerate: int, batch_size: int, max_batch_duration_s: float = 60.0):
+    """Yields batches for alignment task. Items are sorted to minimize padding.
+    Also splits batches if the total duration or memory usage would be too high.
+    """
+    # Sort items by file size as a proxy for audio length
     sorted_items = sorted(items, key=lambda x: len(x['wav_fn'].read_bytes()) if isinstance(x.get('wav_fn'), pathlib.Path) else 0, reverse=True)
     
-    for i in range(0, len(sorted_items), batch_size):
-        batch_items = sorted_items[i:i + batch_size]
+    current_batch = []
+    
+    for item in sorted_items:
+        current_batch.append(item)
         
+        # We need to peek at the actual duration of the first (longest) item in the batch
+        # To avoid loading it twice, we'll just use a rough estimate if we haven't loaded it,
+        # but since we have to load it anyway, let's load on the fly or just use a conservative limit.
+        # For simplicity, we'll just check before yielding if we hit batch limit
+        if len(current_batch) >= batch_size:
+            wavs = []
+            durations = []
+            word_durs_list = []
+            
+            for b_item in current_batch:
+                waveform, _ = librosa.load(b_item['wav_fn'], sr=model_samplerate, mono=True)
+                wavs.append(waveform)
+                durations.append(len(waveform) / model_samplerate)
+                word_durs_list.append(np.array(b_item['word_dur'], dtype=np.float32))
+                
+            padded_wavs = pad_1d_arrays(wavs)
+            padded_word_durs = pad_1d_arrays(word_durs_list, pad_value=0.0)
+            
+            yield (
+                padded_wavs.astype(np.float32), 
+                np.array(durations, dtype=np.float32), 
+                padded_word_durs.astype(np.float32), 
+                current_batch
+            )
+            current_batch = []
+            continue
+            
+        # Optional: memory limit heuristic for align
+        # Since we don't load the waveform until we yield, we can estimate duration from file size
+        # Very rough estimate: 1 byte ~= 1/samplerate * bytes_per_sample seconds
+        if len(current_batch) > 0:
+            longest_item = current_batch[0]
+            if isinstance(longest_item.get('wav_fn'), pathlib.Path):
+                file_size_bytes = len(longest_item['wav_fn'].read_bytes())
+                # Assume 16-bit PCM mono: 2 bytes per sample
+                estimated_max_duration = file_size_bytes / (model_samplerate * 2)
+                if estimated_max_duration * len(current_batch) > max_batch_duration_s:
+                    wavs = []
+                    durations = []
+                    word_durs_list = []
+                    
+                    for b_item in current_batch:
+                        waveform, _ = librosa.load(b_item['wav_fn'], sr=model_samplerate, mono=True)
+                        wavs.append(waveform)
+                        durations.append(len(waveform) / model_samplerate)
+                        word_durs_list.append(np.array(b_item['word_dur'], dtype=np.float32))
+                        
+                    padded_wavs = pad_1d_arrays(wavs)
+                    padded_word_durs = pad_1d_arrays(word_durs_list, pad_value=0.0)
+                    
+                    yield (
+                        padded_wavs.astype(np.float32), 
+                        np.array(durations, dtype=np.float32), 
+                        padded_word_durs.astype(np.float32), 
+                        current_batch
+                    )
+                    current_batch = []
+
+    # Yield remaining
+    if current_batch:
         wavs = []
         durations = []
         word_durs_list = []
         
-        for item in batch_items:
-            waveform, _ = librosa.load(item['wav_fn'], sr=model_samplerate, mono=True)
+        for b_item in current_batch:
+            waveform, _ = librosa.load(b_item['wav_fn'], sr=model_samplerate, mono=True)
             wavs.append(waveform)
             durations.append(len(waveform) / model_samplerate)
-            word_durs_list.append(np.array(item['word_dur'], dtype=np.float32))
+            word_durs_list.append(np.array(b_item['word_dur'], dtype=np.float32))
             
         padded_wavs = pad_1d_arrays(wavs)
         padded_word_durs = pad_1d_arrays(word_durs_list, pad_value=0.0)
@@ -416,7 +489,7 @@ def align_batch_generator(items: list[dict], model_samplerate: int, batch_size: 
             padded_wavs.astype(np.float32), 
             np.array(durations, dtype=np.float32), 
             padded_word_durs.astype(np.float32), 
-            batch_items
+            current_batch
         )
 
 def align_with_transcriptions(
