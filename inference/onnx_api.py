@@ -26,10 +26,24 @@ class NoteInfo:
     pitch: float
 
 
+def pad_1d_arrays(arrays: list[np.ndarray], pad_value=0.0) -> np.ndarray:
+    """Pad a list of 1D numpy arrays to the maximum length and stack them."""
+    if not arrays:
+        return np.array([])
+    max_len = max(len(arr) for arr in arrays)
+    if max_len == 0:
+        return np.zeros((len(arrays), 1), dtype=arrays[0].dtype)
+    
+    padded = []
+    for arr in arrays:
+        pad_width = max_len - len(arr)
+        padded.append(np.pad(arr, (0, pad_width), constant_values=pad_value))
+    return np.stack(padded)
+
+
 class ONNXInferenceModel:
     """
-    Manages ONNX inference sessions and the inference process for a single chunk.
-    This class is intended for internal use by the API functions.
+    Manages ONNX inference sessions and the inference process.
     """
     
     def __init__(self, model_dir: pathlib.Path, use_dml: bool = True):
@@ -43,7 +57,9 @@ class ONNXInferenceModel:
         
         sess_options = ort.SessionOptions()
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        sess_options.enable_mem_pattern = True
+        # 关闭 mem_pattern 和 cpu_mem_arena 来防止变长输入导致的显存/内存不断上升(泄漏)
+        sess_options.enable_mem_pattern = False
+        sess_options.enable_cpu_mem_arena = False
         
         if use_dml:
             providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
@@ -66,62 +82,133 @@ class ONNXInferenceModel:
             (model_dir / "bd2dur.onnx").as_posix(), sess_options=sess_options, providers=providers
         )
     
-    def infer_chunk(
+    def infer_batch(
         self,
-        waveform: np.ndarray,
-        known_durations: np.ndarray,
+        waveforms: np.ndarray,      # [B, L]
+        durations: np.ndarray,      # [B]
+        known_durations: np.ndarray, # [B, N] or None
         boundary_threshold: float,
         boundary_radius: int,
         score_threshold: float,
         language: int = 0,
         ts: list[float] = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """
+        真正的batch并行推理。
+        
+        关键发现：
+        - ONNX encoder会根据duration参数自动生成正确的maskT
+        - maskT会在所有后续模块中正确处理padding区域
+        - 只要提供正确的duration，waveform可以直接padding，不会影响结果
+        - 这使得真正的batch并行推理成为可能
+        
+        工作流程：
+        1. Encoder接收padded waveforms和durations，生成maskT标识有效帧
+        2. 所有后续模块（segmenter, bd2dur, estimator）使用maskT处理padding
+        3. maskN标识每个样本的有效音符数量
+        4. 最终使用maskN过滤结果，只返回有效音符
+        """
         if ts is None:
             ts = []
         
-        if waveform.ndim == 1:
-            waveform = waveform[np.newaxis, :]
+        batch_size = waveforms.shape[0]
         
-        duration = waveform.shape[1] / self.samplerate
-        
-        enc_out = self.encoder.run(None, {"waveform": waveform, "duration": np.array([duration], dtype=np.float32)})
+        # 1. Encoder - 直接处理整个batch
+        # encoder会根据durations自动生成maskT来标识每个样本的有效帧
+        enc_out = self.encoder.run(None, {
+            "waveform": waveforms,
+            "duration": durations
+        })
         x_seg, x_est, maskT = enc_out[0], enc_out[1], enc_out[2]
         
+        # 2. Known Boundaries - batch处理
         if known_durations is not None and known_durations.size > 0:
-            if known_durations.ndim == 1:
-                known_durations = known_durations[np.newaxis, :]
-            known_boundaries = self.dur2bd.run(None, {"durations": known_durations.astype(np.float32), "maskT": maskT})[0]
+            known_boundaries = np.zeros_like(maskT, dtype=bool)
+            for i in range(batch_size):
+                valid_k_durs = known_durations[i][known_durations[i] > 0]
+                if len(valid_k_durs) > 0:
+                    kd_input = valid_k_durs[np.newaxis, :].astype(np.float32)
+                    sample_maskT = maskT[i:i+1]
+                    kb = self.dur2bd.run(None, {
+                        "durations": kd_input,
+                        "maskT": sample_maskT
+                    })[0]
+                    known_boundaries[i:i+1] = kb
         else:
             known_boundaries = np.zeros_like(maskT, dtype=bool)
         
-        boundaries = known_boundaries
+        # 3. Segmenter Loop - batch处理
+        boundaries = known_boundaries.copy()
+        lang_arr = np.array([language] * batch_size, dtype=np.int64)
+        
         if self.loop and len(ts) > 0:
             for t in ts:
+                t_arr = np.array([t] * batch_size, dtype=np.float32)
                 boundaries = self.segmenter.run(None, {
-                    "x_seg": x_seg, "language": np.array([language], dtype=np.int64),
-                    "known_boundaries": known_boundaries, "prev_boundaries": boundaries,
-                    "t": np.array(t, dtype=np.float32), "maskT": maskT,
+                    "x_seg": x_seg,
+                    "language": lang_arr,
+                    "known_boundaries": known_boundaries,
+                    "prev_boundaries": boundaries,
+                    "t": t_arr,
+                    "maskT": maskT,
                     "threshold": np.array(boundary_threshold, dtype=np.float32),
                     "radius": np.array(boundary_radius, dtype=np.int64),
                 })[0]
         else:
-             boundaries = self.segmenter.run(None, {
-                "x_seg": x_seg, "language": np.array([language], dtype=np.int64),
-                "known_boundaries": known_boundaries, "prev_boundaries": boundaries,
-                "t": np.array(0.0, dtype=np.float32), "maskT": maskT,
+            t_arr = np.array([0.0] * batch_size, dtype=np.float32)
+            boundaries = self.segmenter.run(None, {
+                "x_seg": x_seg,
+                "language": lang_arr,
+                "known_boundaries": known_boundaries,
+                "prev_boundaries": boundaries,
+                "t": t_arr,
+                "maskT": maskT,
                 "threshold": np.array(boundary_threshold, dtype=np.float32),
                 "radius": np.array(boundary_radius, dtype=np.int64),
             })[0]
         
-        durations, maskN = self.bd2dur.run(None, {"boundaries": boundaries, "maskT": maskT})
-        
-        presence, scores = self.estimator.run(None, {
-            "x_est": x_est, "boundaries": boundaries, "maskT": maskT, "maskN": maskN,
-            "threshold": np.array(score_threshold, dtype=np.float32)
+        # 4. bd2dur - batch处理
+        durations_out, maskN = self.bd2dur.run(None, {
+            "boundaries": boundaries,
+            "maskT": maskT
         })
         
-        valid = maskN[0].astype(bool)
-        return durations[0][valid], presence[0][valid], scores[0][valid]
+        # 5. Estimator - 逐个处理避免padding影响
+        # 关键发现：estimator在batch中处理padding样本时会出错
+        # 即使提供了maskT，短样本的presence仍会被错误置为0
+        # 解决方案：对每个样本单独调用estimator
+        results = []
+        for i in range(batch_size):
+            # 获取该样本的有效帧数
+            valid_frames = int(np.sum(maskT[i]))
+            
+            # 提取该样本的有效部分（无padding）
+            sample_x_est = x_est[i:i+1, :valid_frames, :]
+            sample_boundaries = boundaries[i:i+1, :valid_frames]
+            sample_maskT = maskT[i:i+1, :valid_frames]
+            
+            # 获取该样本的有效音符数
+            valid_notes = int(np.sum(maskN[i]))
+            sample_maskN = maskN[i:i+1, :valid_notes]
+            
+            # 单独调用estimator
+            presence_i, scores_i = self.estimator.run(None, {
+                "x_est": sample_x_est,
+                "boundaries": sample_boundaries,
+                "maskT": sample_maskT,
+                "maskN": sample_maskN,
+                "threshold": np.array(score_threshold, dtype=np.float32)
+            })
+            
+            # 提取有效结果
+            valid = sample_maskN[0].astype(bool)
+            results.append((
+                durations_out[i][:valid_notes][valid],
+                presence_i[0][valid],
+                scores_i[0][valid]
+            ))
+        
+        return results
 
 
 def load_onnx_model(
@@ -198,6 +285,40 @@ def _save_text(
     print(f"Saved {file_format.upper()} file: {filepath}")
 
 
+def enforce_max_chunk_size(chunks: list[dict], max_duration_s: float, samplerate: int) -> list[dict]:
+    """Further splits chunks that are too long to control VRAM."""
+    max_samples = int(max_duration_s * samplerate)
+    new_chunks = []
+    for chunk in chunks:
+        if len(chunk['waveform']) > max_samples:
+            original_offset = chunk['offset']
+            for i in range(0, len(chunk['waveform']), max_samples):
+                sub_chunk_wav = chunk['waveform'][i:i + max_samples]
+                new_chunks.append({
+                    'waveform': sub_chunk_wav,
+                    'offset': original_offset + (i / samplerate)
+                })
+        else:
+            new_chunks.append(chunk)
+    return new_chunks
+
+def extract_batch_generator(chunks: list[dict], batch_size: int, samplerate: int):
+    """Yields batches of padded audio chunks for extraction.
+    Chunks are sorted by length to minimize padding overhead and mitigate ONNX padding leakage.
+    """
+    # Create a local copy to sort
+    sorted_chunks = sorted(chunks, key=lambda x: len(x['waveform']), reverse=True)
+    
+    for i in range(0, len(sorted_chunks), batch_size):
+        batch_chunks = sorted_chunks[i:i + batch_size]
+        
+        wavs = [c['waveform'] for c in batch_chunks]
+        padded_wavs = pad_1d_arrays(wavs)
+        durations = np.array([len(w) / samplerate for w in wavs], dtype=np.float32)
+            
+        yield padded_wavs.astype(np.float32), durations, batch_chunks
+
+
 def infer_from_files(
     model: ONNXInferenceModel,
     filemap: dict[str, pathlib.Path],
@@ -211,20 +332,35 @@ def infer_from_files(
     pitch_format: str,
     round_pitch: bool,
     tempo: float,
+    batch_size: int = 4,
+    max_chunk_duration_s: float = 15.0,
 ):
-    slicer = Slicer(sr=model.samplerate, threshold=-40., min_length=1000, min_interval=200, max_sil_kept=100)
+    slicer = Slicer(
+        sr=model.samplerate,
+        threshold=-40.,
+        min_length=1000,
+        min_interval=200,
+        max_sil_kept=100,
+    )
     boundary_radius_frames = round(seg_radius / model.timestep)
 
     for key, filepath in filemap.items():
         print(f"\nProcessing: {key}")
         waveform, _ = librosa.load(filepath, sr=model.samplerate, mono=True)
-        chunks = slicer.slice(waveform)
-        print(f"  Sliced into {len(chunks)} chunks")
+        initial_chunks = slicer.slice(waveform)
+        
+        # Enforce max chunk size to prevent VRAM OOM
+        chunks = enforce_max_chunk_size(initial_chunks, max_chunk_duration_s, model.samplerate)
+        print(f"  Sliced into {len(chunks)} chunks, batch size: {batch_size}")
 
         all_notes = []
-        for chunk in chunks:
-            durations, presence, scores = model.infer_chunk(
-                waveform=chunk["waveform"],
+        
+        for batch_wavs, batch_durations, batch_chunks in extract_batch_generator(chunks, batch_size, model.samplerate):
+            
+            # Run inference on batch
+            batch_results = model.infer_batch(
+                waveforms=batch_wavs,
+                durations=batch_durations,
                 known_durations=None,
                 boundary_threshold=seg_threshold,
                 boundary_radius=boundary_radius_frames,
@@ -232,12 +368,18 @@ def infer_from_files(
                 language=language_id,
                 ts=ts,
             )
-            note_onset = np.concatenate([[0], np.cumsum(durations[:-1])]) + chunk["offset"]
-            note_offset = np.cumsum(durations) + chunk["offset"]
             
-            for onset, offset, score, is_present in zip(note_onset, note_offset, scores, presence):
-                if offset - onset > 0 and is_present:
-                    all_notes.append(NoteInfo(onset=onset, offset=offset, pitch=score))
+            # Process results
+            for chunk_result, chunk_info in zip(batch_results, batch_chunks):
+                durations, presence, scores = chunk_result
+                chunk_offset = chunk_info['offset']
+                
+                note_onset = np.concatenate([[0], np.cumsum(durations[:-1])]) + chunk_offset
+                note_offset = np.cumsum(durations) + chunk_offset
+                
+                for onset, offset, score, is_present in zip(note_onset, note_offset, scores, presence):
+                    if offset - onset > 0 and is_present:
+                        all_notes.append(NoteInfo(onset=onset, offset=offset, pitch=score))
 
         all_notes.sort(key=lambda x: x.onset)
         print(f"  Extracted {len(all_notes)} notes")
@@ -249,6 +391,33 @@ def infer_from_files(
             _save_text(all_notes, output_dir / f"{output_key}.txt", "txt", pitch_format, round_pitch)
         if "csv" in output_formats:
             _save_text(all_notes, output_dir / f"{output_key}.csv", "csv", pitch_format, round_pitch)
+
+def align_batch_generator(items: list[dict], model_samplerate: int, batch_size: int):
+    """Yields batches for alignment task. Items are sorted to minimize padding."""
+    sorted_items = sorted(items, key=lambda x: len(x['wav_fn'].read_bytes()) if isinstance(x.get('wav_fn'), pathlib.Path) else 0, reverse=True)
+    
+    for i in range(0, len(sorted_items), batch_size):
+        batch_items = sorted_items[i:i + batch_size]
+        
+        wavs = []
+        durations = []
+        word_durs_list = []
+        
+        for item in batch_items:
+            waveform, _ = librosa.load(item['wav_fn'], sr=model_samplerate, mono=True)
+            wavs.append(waveform)
+            durations.append(len(waveform) / model_samplerate)
+            word_durs_list.append(np.array(item['word_dur'], dtype=np.float32))
+            
+        padded_wavs = pad_1d_arrays(wavs)
+        padded_word_durs = pad_1d_arrays(word_durs_list, pad_value=0.0)
+        
+        yield (
+            padded_wavs.astype(np.float32), 
+            np.array(durations, dtype=np.float32), 
+            padded_word_durs.astype(np.float32), 
+            batch_items
+        )
 
 def align_with_transcriptions(
     model: ONNXInferenceModel,
@@ -262,6 +431,7 @@ def align_with_transcriptions(
     inplace: bool,
     save_dir: pathlib.Path,
     save_name: str,
+    batch_size: int = 4,
 ):
     boundary_radius_frames = round(seg_radius / model.timestep)
     extensions = [".wav", ".flac"]
@@ -274,7 +444,10 @@ def align_with_transcriptions(
             fieldnames = reader.fieldnames
             items = list(reader)
         
-        updated_items = []
+        # Pre-process items to find waveforms and calculate durations
+        valid_items = []
+        updated_items = [] # We'll build this and insert processed items later
+        
         for item in items:
             name = item["name"]
             
@@ -283,6 +456,7 @@ def align_with_transcriptions(
             
             if wav_fn is None:
                 print(f"  - WARNING: Waveform file not found for item '{name}'. Skipping.")
+                # We still need to keep it in the final output, just un-updated
                 updated_items.append(item)
                 continue
 
@@ -300,12 +474,19 @@ def align_with_transcriptions(
                     word_dur = [sum(ph_dur)]
             else:
                 word_dur = [sum(ph_dur)]
+                
+            item['wav_fn'] = wav_fn
+            item['word_dur'] = word_dur
+            valid_items.append(item)
+
+        # Process valid items in batches
+        print(f"  Batch processing {len(valid_items)} items (batch_size={batch_size})...")
+        for batch_wavs, batch_durations, batch_known_durations, batch_items in align_batch_generator(valid_items, model.samplerate, batch_size):
             
-            waveform, _ = librosa.load(wav_fn, sr=model.samplerate, mono=True)
-            
-            durations, presence, scores = model.infer_chunk(
-                waveform=waveform,
-                known_durations=np.array([word_dur]),
+            batch_results = model.infer_batch(
+                waveforms=batch_wavs,
+                durations=batch_durations,
+                known_durations=batch_known_durations,
                 boundary_threshold=seg_threshold,
                 boundary_radius=boundary_radius_frames,
                 score_threshold=est_threshold,
@@ -313,17 +494,25 @@ def align_with_transcriptions(
                 ts=ts,
             )
             
-            note_seq = [
-                librosa.midi_to_note(score, unicode=False, cents=True) if pres else "rest"
-                for score, pres in zip(scores, presence)
-            ]
-            note_dur = [f"{dur:.3f}" for dur in durations]
-            
-            item["note_seq"] = " ".join(note_seq)
-            item["note_dur"] = " ".join(note_dur)
-            item.pop("note_glide", None)
-            updated_items.append(item)
-            print(f"  - Processed item: {name}")
+            for chunk_result, item in zip(batch_results, batch_items):
+                durations, presence, scores = chunk_result
+                
+                note_seq = [
+                    librosa.midi_to_note(score, unicode=False, cents=True) if pres else "rest"
+                    for score, pres in zip(scores, presence)
+                ]
+                note_dur = [f"{dur:.3f}" for dur in durations]
+                
+                # Cleanup temporary fields
+                del item['wav_fn']
+                del item['word_dur']
+                
+                item["note_seq"] = " ".join(note_seq)
+                item["note_dur"] = " ".join(note_dur)
+                item.pop("note_glide", None)
+                updated_items.append(item)
+                
+        print(f"  - Processed all items.")
 
         if inplace:
             output_path = index_path
@@ -334,7 +523,6 @@ def align_with_transcriptions(
             
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with output_path.open("w", encoding="utf8", newline="") as f:
-            # Ensure all required fields are present
             if "note_seq" not in fieldnames:
                 fieldnames.append("note_seq")
             if "note_dur" not in fieldnames:

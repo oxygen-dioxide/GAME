@@ -115,6 +115,7 @@ def shared_options(func=None, *, defaults: dict[str, Any] = None):
         click.option("-m", "--model", required=True, type=click.Path(exists=True, dir_okay=True, file_okay=False, readable=True, path_type=pathlib.Path), help="Path to the ONNX model directory."),
         click.option("-d", "--device", type=click.Choice(["dml", "cpu"]), default="dml", show_default=True, help="Execution provider."),
         click.option("-l", "--language", type=str, help="Language code for segmentation."),
+        click.option("--batch-size", type=click.IntRange(min=1), show_default=True, default=defaults.get(_OPT_KEY_BATCH_SIZE, 2), help="Batch size for inference."),
         click.option("--seg-threshold", type=click.FloatRange(0, 1, max_open=True), default=defaults.get(_OPT_KEY_SEG_THRESHOLD, 0.2), show_default=True, help="Boundary decoding threshold."),
         click.option("--seg-radius", type=click.FloatRange(min=0.01), default=defaults.get(_OPT_KEY_SEG_RADIUS, 0.02), show_default=True, help="Boundary decoding radius in seconds."),
         click.option("--t0", "--seg-d3pm-t0", type=click.FloatRange(0, 1, max_open=True), default=defaults.get(_OPT_KEY_SEG_D3PM_T0, 0.0), show_default=True, help="D3PM starting T value (t0)."),
