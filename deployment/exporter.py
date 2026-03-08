@@ -91,13 +91,15 @@ class Exporter:
     def __init__(
             self, model: SegmentationEstimationInferenceModel,
             save_dir: str | pathlib.Path,
-            opset_version: int = None
+            dynamo: bool = False,
+            opset_version: int = None,
     ):
         self.model = model
         if isinstance(save_dir, str):
             save_dir = pathlib.Path(save_dir)
         self.save_dir = save_dir
         save_dir.mkdir(parents=True, exist_ok=True)
+        self.dynamo = dynamo
         self.opset_version = opset_version
         self.config_path = self.save_dir / "config.json"
         self.encoder_path = self.save_dir / "encoder.onnx"
@@ -107,10 +109,11 @@ class Exporter:
         self.bd2dur_path = self.save_dir / "bd2dur.onnx"
 
     def export(self):
-        self.export_encoder()
-        self.export_segmenter()
-        self.export_estimator()
-        self.export_converters()
+        with torch.no_grad():
+            self.export_encoder()
+            self.export_segmenter()
+            self.export_estimator()
+            self.export_converters()
         logging.info(f"Exported encoder to \'{self.encoder_path.as_posix()}\'.")
         logging.info(f"Exported segmenter to \'{self.segmenter_path.as_posix()}\'.")
         logging.info(f"Exported estimator to \'{self.estimator_path.as_posix()}\'.")
@@ -120,13 +123,49 @@ class Exporter:
     def export_encoder(self):
         logging.debug("Exporting encoder start.")
         encoder_wrapper = WrappedEncoderModel(self.model)
+        if self.dynamo:
+            dump_path = None
+            dynamic_axes = None
+            dynamic_shapes = (
+                {
+                    0: "B",
+                    1: "L",
+                },
+                {
+                    0: "B",
+                },
+            )
+        else:
+            dump_path = self.encoder_path
+            dynamic_axes = {
+                "waveform": {
+                    0: "B",
+                    1: "L",
+                },
+                "duration": {
+                    0: "B",
+                },
+                "x_seg": {
+                    0: "B",
+                    1: "T",
+                },
+                "x_est": {
+                    0: "B",
+                    1: "T",
+                },
+                "maskT": {
+                    0: "B",
+                    1: "T",
+                },
+            }
+            dynamic_shapes = None
         program = torch.onnx.export(
             encoder_wrapper,
             (
-                torch.randn(1, 441000), # 10 seconds fixed chunk
-                torch.tensor([10.0]),
+                torch.randn(4, 44100),
+                torch.randn(4),
             ),
-            None,
+            dump_path,
             input_names=[
                 "waveform",
                 "duration",
@@ -136,13 +175,16 @@ class Exporter:
                 "x_est",
                 "maskT",
             ],
+            dynamic_axes=dynamic_axes,
+            dynamic_shapes=dynamic_shapes,
             opset_version=self.opset_version,
-            dynamo=True,
+            dynamo=self.dynamo,
             external_data=False,
             dump_exported_program=False,
         )
-        _clear_stacktrace(program)
-        program.save(self.encoder_path)
+        if self.dynamo:
+            _clear_stacktrace(program)
+            program.save(self.encoder_path)
         _slim_onnx_model(self.encoder_path)
         logging.debug("Exporting encoder done.")
 
@@ -150,13 +192,47 @@ class Exporter:
         logging.debug("Exporting segmenter start.")
         segmenter_wrapper = WrappedSegmenterModel(self.model)
         example_kwargs = {
-            "language": torch.zeros((1,), dtype=torch.int64),
-            "known_boundaries": torch.ones(1, 1000, dtype=torch.bool),
-            "prev_boundaries": torch.ones(1, 1000, dtype=torch.bool),
-            "t": torch.rand(()),
-            "maskT": torch.ones(1, 1000, dtype=torch.bool),
+            "language": torch.zeros((4,), dtype=torch.int64),
+            "known_boundaries": torch.ones(4, 100, dtype=torch.bool),
+            "prev_boundaries": torch.ones(4, 100, dtype=torch.bool),
+            "t": torch.rand((4,)),
+            "maskT": torch.ones(4, 100, dtype=torch.bool),
             "threshold": torch.tensor(0.5, dtype=torch.float32),
             "radius": torch.tensor(2, dtype=torch.int64),
+        }
+        dynamic_arg_shapes = {
+            "x_seg": {
+                0: "B",
+                1: "T",
+            },
+        }
+        dynamic_kwarg_shapes = {
+            "language": {
+                0: "B",
+            },
+            "known_boundaries": {
+                0: "B",
+                1: "T",
+            },
+            "prev_boundaries": {
+                0: "B",
+                1: "T",
+            },
+            "t": {
+                0: "B",
+            },
+            "maskT": {
+                0: "B",
+                1: "T",
+            },
+            "threshold": {},
+            "radius": {},
+        }
+        dynamic_out_shapes = {
+            "boundaries": {
+                0: "B",
+                1: "T",
+            },
         }
         input_kwarg_names = []
         if self.model.model_config.use_languages:
@@ -172,10 +248,31 @@ class Exporter:
             "threshold",
             "radius",
         ])
+        if self.dynamo:
+            dump_path = None
+            dynamic_shapes = {
+                **dynamic_arg_shapes,
+                **{
+                    k: dynamic_kwarg_shapes[k]
+                    for k in input_kwarg_names
+                }
+            }
+            dynamic_axes = None
+        else:
+            dump_path = self.segmenter_path
+            dynamic_shapes = None
+            dynamic_axes = {
+                **dynamic_arg_shapes,
+                **{
+                    k: dynamic_kwarg_shapes[k]
+                    for k in input_kwarg_names
+                },
+                **dynamic_out_shapes,
+            }
         program = torch.onnx.export(
             segmenter_wrapper,
-            torch.randn(1, 1000, self.model.model_config.embedding_dim),
-            None,
+            torch.randn(4, 100, self.model.model_config.embedding_dim),
+            dump_path,
             kwargs={
                 k: example_kwargs[k]
                 for k in input_kwarg_names
@@ -187,29 +284,83 @@ class Exporter:
             output_names=[
                 "boundaries",
             ],
+            dynamic_axes=dynamic_axes,
+            dynamic_shapes=dynamic_shapes,
             opset_version=self.opset_version,
-            dynamo=True,
+            dynamo=self.dynamo,
             external_data=False,
             dump_exported_program=False,
         )
-        _clear_stacktrace(program)
-        program.save(self.segmenter_path)
+        if self.dynamo:
+            _clear_stacktrace(program)
+            program.save(self.segmenter_path)
         _slim_onnx_model(self.segmenter_path)
         logging.debug("Exporting segmenter done.")
 
     def export_estimator(self):
         logging.debug("Exporting estimator start.")
         estimator_wrapper = WrappedEstimatorModel(self.model)
+        if self.dynamo:
+            dump_path = None
+            dynamic_axes = None
+            dynamic_shapes = (
+                {
+                    0: "B",
+                    1: "T",
+                },
+                {
+                    0: "B",
+                    1: "T",
+                },
+                {
+                    0: "B",
+                    1: "T",
+                },
+                {
+                    0: "B",
+                    1: "N",
+                },
+                {},
+            )
+        else:
+            dump_path = self.estimator_path
+            dynamic_axes = {
+                "x_est": {
+                    0: "B",
+                    1: "T",
+                },
+                "boundaries": {
+                    0: "B",
+                    1: "T",
+                },
+                "maskT": {
+                    0: "B",
+                    1: "T",
+                },
+                "maskN": {
+                    0: "B",
+                    1: "N",
+                },
+                "presence": {
+                    0: "B",
+                    1: "N",
+                },
+                "scores": {
+                    0: "B",
+                    1: "N",
+                },
+            }
+            dynamic_shapes = None
         program = torch.onnx.export(
             estimator_wrapper,
             (
-                torch.randn(1, 1000, self.model.model_config.embedding_dim),
-                (torch.arange(0, 1000, dtype=torch.int64) % 5 == 0).unsqueeze(0).expand(1, -1),
-                torch.ones(1, 1000, dtype=torch.bool),
-                torch.ones(1, 200, dtype=torch.bool),
+                torch.randn(4, 100, self.model.model_config.embedding_dim),
+                (torch.arange(0, 100, dtype=torch.int64) % 10 == 0).unsqueeze(0).expand(4, -1),
+                torch.ones(4, 100, dtype=torch.bool),
+                torch.ones(4, 10, dtype=torch.bool),
                 torch.tensor(0.5, dtype=torch.float32),
             ),
-            None,
+            dump_path,
             input_names=[
                 "x_est",
                 "boundaries",
@@ -221,26 +372,59 @@ class Exporter:
                 "presence",
                 "scores",
             ],
+            dynamic_axes=dynamic_axes,
+            dynamic_shapes=dynamic_shapes,
             opset_version=self.opset_version,
-            dynamo=True,
+            dynamo=self.dynamo,
             external_data=False,
             dump_exported_program=False,
         )
-        _clear_stacktrace(program)
-        program.save(self.estimator_path)
+        if self.dynamo:
+            _clear_stacktrace(program)
+            program.save(self.estimator_path)
         _slim_onnx_model(self.estimator_path)
         logging.debug("Exporting estimator done.")
 
     def export_converters(self):
         logging.debug("Exporting dur2bd start.")
         dur2bd = Durations2Boundaries(timestep=self.model.timestep)
+        if self.dynamo:
+            dump_path = None
+            dynamic_shapes = (
+                {
+                    0: "B",
+                    1: "N",
+                },
+                {
+                    0: "B",
+                    1: "T",
+                },
+            )
+            dynamic_axes = None
+        else:
+            dump_path = self.dur2bd_path
+            dynamic_shapes = None
+            dynamic_axes = {
+                "durations": {
+                    0: "B",
+                    1: "N",
+                },
+                "maskT": {
+                    0: "B",
+                    1: "T",
+                },
+                "boundaries": {
+                    0: "B",
+                    1: "T",
+                },
+            }
         program = torch.onnx.export(
             dur2bd,
             (
-                torch.rand(1, 200),
-                torch.ones(1, 1000, dtype=torch.bool),
+                torch.rand(4, 10),
+                torch.ones(4, 100, dtype=torch.bool),
             ),
-            self.save_dir / "dur2bd.onnx",
+            dump_path,
             input_names=[
                 "durations",
                 "maskT",
@@ -248,13 +432,16 @@ class Exporter:
             output_names=[
                 "boundaries",
             ],
+            dynamic_axes=dynamic_axes,
+            dynamic_shapes=dynamic_shapes,
             opset_version=self.opset_version,
-            dynamo=True,
+            dynamo=self.dynamo,
             external_data=False,
             dump_exported_program=False,
         )
-        _clear_stacktrace(program)
-        program.save(self.dur2bd_path)
+        if self.dynamo:
+            _clear_stacktrace(program)
+            program.save(self.dur2bd_path)
         _slim_onnx_model(self.dur2bd_path)
         logging.debug("Exporting dur2bd done.")
 
@@ -263,8 +450,8 @@ class Exporter:
         torch.onnx.export(
             bd2dur,
             (
-                (torch.arange(0, 1000, dtype=torch.int64) % 5 == 0).unsqueeze(0).expand(1, -1),
-                torch.ones(1, 1000, dtype=torch.bool),
+                (torch.arange(0, 100, dtype=torch.int64) % 10 == 0).unsqueeze(0).expand(4, -1),
+                torch.ones(4, 100, dtype=torch.bool),
             ),
             self.bd2dur_path,
             input_names=[
@@ -275,6 +462,24 @@ class Exporter:
                 "durations",
                 "maskN",
             ],
+            dynamic_axes={
+                "boundaries": {
+                    0: "B",
+                    1: "T",
+                },
+                "maskT": {
+                    0: "B",
+                    1: "T",
+                },
+                "durations": {
+                    0: "B",
+                    1: "N",
+                },
+                "maskN": {
+                    0: "B",
+                    1: "N",
+                },
+            },
             # We don't use Dynamo here because the function contains dynamic shapes depending on inputs.
             opset_version=min(20, self.opset_version),
             dynamo=False,

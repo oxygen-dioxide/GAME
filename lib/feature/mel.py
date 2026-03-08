@@ -57,7 +57,7 @@ class StretchableMelSpectrogram(torch.nn.Module):
             (win_length_new - hop_length_new + 1) // 2
         ), mode='reflect')
 
-        return_complex = not is_export_mode()
+        return_complex = not export_mode
         spec = torch.stft(
             y, n_fft_new, hop_length=hop_length_new,
             win_length=win_length_new, window=window,

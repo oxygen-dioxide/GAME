@@ -46,9 +46,7 @@ class SegmentationEstimationInferenceModel(nn.Module):
             mask, threshold, radius,
             language=None, t=None,
     ):
-        B = x_seg.size(0)
         if self.model_config.mode == "d3pm":
-            t = t.unsqueeze(0).expand(B)
             p = d3pm_time_schedule(t)
             boundaries = remove_mutable_boundaries(prev_boundaries, known_boundaries, p=p)
         elif self.model_config.mode == "completion":
@@ -113,6 +111,7 @@ class SegmentationEstimationInferenceModel(nn.Module):
         if self.model_config.mode == "d3pm":
             boundaries = known_boundaries
             for ti in t:
+                ti = ti.unsqueeze(0).expand(x_seg.size(0))  # scalar -> [B]
                 boundaries = self.forward_and_decode_boundaries(
                     x_seg, known_boundaries=known_boundaries,
                     prev_boundaries=boundaries, t=ti,

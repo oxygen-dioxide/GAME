@@ -19,23 +19,33 @@ import click
     help="Directory to save evaluation results."
 )
 @click.option(
+    "--dynamo", is_flag=True, default=False, show_default=True,
+    help=(
+            "Whether to use TorchDynamo for export. This is recommended for opset version 18 or higher, "
+            "but some Execution Providers (like DirectML) may encounter compatibility issues."
+    )
+)
+@click.option(
     "--opset-version", type=click.IntRange(min=17),
-    default=20, show_default=True,
+    default=17, show_default=True,
     help="ONNX opset version to use for export."
 )
 def main(
         model: pathlib.Path,
         save_dir: pathlib.Path,
+        dynamo: bool,
         opset_version: int,
 ):
     from inference.api import load_inference_model
     from deployment.api import deploy_model
+    from deployment.context import export_mode
 
-    model, lang_map = load_inference_model(model)
-    deploy_model(
-        model=model, lang_map=lang_map, save_dir=save_dir,
-        opset_version=opset_version,
-    )
+    with export_mode():
+        model, lang_map = load_inference_model(model)
+        deploy_model(
+            model=model, lang_map=lang_map, save_dir=save_dir,
+            dynamo=dynamo, opset_version=opset_version,
+        )
 
 
 if __name__ == '__main__':
