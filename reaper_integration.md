@@ -4,7 +4,7 @@
 ## 安装
 安装 Reaper 和 Python
 
-下载 [GAME Onnx模型](https://github.com/openvpi/GAME/releases/tag/v1.0.2)，解压
+下载 [GAME Onnx模型](https://github.com/openvpi/GAME/releases)，解压
 
 在命令行中运行：
 
