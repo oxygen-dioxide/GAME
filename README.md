@@ -19,6 +19,14 @@ GAME is the upgraded successor of [SOME](https://github.com/openvpi/SOME), desig
 2. Align notes to labeled word boundaries, in dataset processing scenarios.
 3. Estimate note pitches from note boundaries adjusted by user in interactive tuning tools.
 
+## Quick Start (Windows Portable Package)
+
+If you are using Windows and want a quick start, you can download the out-of-the-box portable package:
+
+**[Link to the portable package goes here]**
+
+> **Note**: The portable package provided by this repository does NOT include PyTorch-related components and only supports pure ONNX inference. If you need to use PyTorch, please install dependencies from `requirements.txt` manually.
+
 ## Installation
 
 GAME is tested under Python 3.12, PyTorch 2.8.0, CUDA 12.9, Lightning 2.6.1. But it should have good compatibility.
@@ -35,11 +43,34 @@ pip install -r requirements.txt
 
 Step 4: If you want to use pretrained models, download them from [releases](https://github.com/openvpi/GAME/releases) or [discussions](https://github.com/openvpi/GAME/discussions).
 
+> **Note for ONNX Users:** The pure ONNX inference script (`infer_onnx.py`) requires `onnxruntime`. If you plan to use it, you must install the appropriate version for your hardware manually (e.g., `pip install onnxruntime` for CPU, or `pip install onnxruntime-directml` for DirectML GPU support on Windows). It is not included in `requirements.txt` by default to keep the standard PyTorch installation clean.
+
 ## Inference
+
+### Inference with ONNX models
+
+For users who want to run inference without PyTorch dependencies, or want to leverage hardware acceleration like DirectML on Windows, a pure ONNX inference script is provided. It achieves the same accuracy as the PyTorch version while offering better portability.
+
+```bash
+python infer_onnx.py extract [path-or-directory] -m [onnx-model-dir] --device [dml|cpu]
+```
+
+The `infer_onnx.py` script provides the exact same command-line interface as the PyTorch-based `infer.py`. The key differences are:
+1. The `-m` argument must point to a **directory** containing the exported `.onnx` models and `config.json`, rather than a `.ckpt` file.
+2. A new `--device` option is available to select the execution provider (`dml` for DirectML GPU acceleration, or `cpu`).
+
+**ONNX VRAM Recommendations (For `medium` models):**
+
+| Device | VRAM | Recommended `batch_size` |
+| :--- | :--- | :--- |
+| DML (GPU) | 8 GB | 4 |
+| DML (GPU) | 6 GB | 2 |
+| DML (GPU) | <= 4 GB | 1 |
+| CPU | Any | 1 |
 
 ### Transcribe raw audio files
 
-The inference script can process single or multiple audio files.
+The PyTorch inference script can process single or multiple audio files.
 
 ```bash
 python infer.py extract [path-or-directory] -m [model-path]
@@ -229,7 +260,7 @@ However, using TorchDynamo and higher opset versions can break compatibilities w
 
 ### Inference with ONNX models
 
-We don't provide implementation of ONNX model inference pipeline in this repository. However, you can read the [documentation](ONNX.md) about the workflow and structures, which may help you understand and implement it.
+We provide a pure ONNX inference pipeline that does not depend on PyTorch. You can use the `infer_onnx.py` script as described in the Inference section. For developers looking to integrate this into their own applications, the core logic is exposed as a modular API in `inference/onnx_api.py`. You can also read the [documentation](ONNX.md) about the underlying workflow and ONNX structures.
 
 ## Integration
 
@@ -237,7 +268,8 @@ For secondary development or downstream integration, this repository exposes ess
 
 - Preprocessing: [preprocessing/api.py](preprocessing/api.py)
 - Training: [training/api.py](training/api.py)
-- Inference and evaluation: [inference/api.py](inference/api.py)
+- PyTorch Inference and evaluation: [inference/api.py](inference/api.py)
+- Pure ONNX Inference: [inference/onnx_api.py](inference/onnx_api.py)
 - Deployment: [deployment/api.py](deployment/api.py)
 
 ## Disclaimer
