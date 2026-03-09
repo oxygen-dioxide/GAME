@@ -64,6 +64,8 @@ def main(
     )
     boundary_radius_frames = round(seg_radius / model.timestep)
     
+    if(len(project.selected_items)==0):
+        print("Please select a media item first.")
     for item in project.selected_items:
         itemInfo = ReaperItemInfo(item)
         print(f"Processing item on track {itemInfo.track_index} from {itemInfo.start}s to {itemInfo.end}s in file {itemInfo.audioPath}...")
