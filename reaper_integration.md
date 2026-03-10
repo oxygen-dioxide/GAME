@@ -35,7 +35,7 @@ This script is based on **GAME** (Generative Adaptive MIDI Extractor) and is des
 ## Installation
 
 1. **Install Reaper and Python** on your system.
-2. **Download the [GAME Onnx Model**](https://github.com/openvpi/GAME/releases/tag/v1.0.2) and extract the files.
+2. **Download the [GAME Onnx Model](https://github.com/openvpi/GAME/releases/tag/v1.0.2)** and extract the files.
 3. **Install dependencies** by running the following commands in your terminal:
 
 ```cmd
