@@ -27,3 +27,41 @@ python -c "import reapy; reapy.configure_reaper()"
 ```cmd
 python reaper_integration.py -m <模型文件夹>
 ```
+
+# GAME Reaper Script
+
+This script is based on **GAME** (Generative Adaptive MIDI Extractor) and is designed to identify audio items in Reaper as MIDI notes.
+
+## Installation
+
+1. **Install Reaper and Python** on your system.
+2. **Download the [GAME Onnx Model**](https://github.com/openvpi/GAME/releases/tag/v1.0.2) and extract the files.
+3. **Install dependencies** by running the following commands in your terminal:
+
+```cmd
+pip install -r requirements_onnx.txt
+pip install python-reapy
+
+```
+
+4. **Configure Reaper integration** by running:
+
+```cmd
+python -c "import reapy; reapy.configure_reaper()"
+
+```
+
+5. **Restart Reaper** to finalize the setup.
+
+---
+
+## Usage
+
+1. Open Reaper and **select the audio items** you wish to convert.
+2. Run the following command in your terminal:
+
+```cmd
+python reaper_integration.py -m <path_to_model_folder>
+
+```
+
